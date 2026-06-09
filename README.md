@@ -33,6 +33,7 @@ script gets its own block** with a short description and the commands to run it.
 | Script | Category | What it does |
 |---|---|---|
 | [`proxmox-wipe.sh`](#proxmox-wipesh) | Proxmox | Destroys all guests and zeroes every non-system disk, with a live progress bar + ETA. |
+| [`install-docker.sh`](#install-dockersh) | Linux | Auto-detects the distro and installs Docker Engine + Compose v2 from Docker's official repos. |
 
 > 📌 This table grows as new scripts are added.
 
@@ -80,12 +81,57 @@ sudo ./proxmox/proxmox-wipe.sh --dry-run
 
 ---
 
+### `install-docker.sh`
+
+> 🐳 One installer for **Docker Engine + Docker Compose v2** that detects the distro and runs the matching official path — apt on Ubuntu/Debian, dnf on Fedora/RHEL/CentOS.
+
+**Location:** [`linux/install-docker.sh`](linux/install-docker.sh)
+
+Reads `/etc/os-release` to pick the right package manager and Docker repository, then installs the
+same official package set everywhere — `docker-ce`, `docker-ce-cli`, `containerd.io`,
+`docker-buildx-plugin` and `docker-compose-plugin` (Compose v2, used as `docker compose`). It also
+enables the service and adds your user to the `docker` group. Mirrors the official
+[docs.docker.com](https://docs.docker.com/engine/install/) steps.
+
+#### ▶️ Run
+
+```bash
+chmod +x linux/install-docker.sh
+sudo ./linux/install-docker.sh --dry-run
+```
+
+#### Commands
+
+| Command | Purpose |
+|---|---|
+| `./install-docker.sh --dry-run` | **Preview only.** Prints the detected distro and every command that would run — nothing is changed. Run this first. |
+| `./install-docker.sh` | Install Docker after an interactive confirmation prompt. |
+| `./install-docker.sh --yes` | Install non-interactively (assume "yes") — handy for provisioning. |
+
+#### Options
+
+| Flag | Description |
+|---|---|
+| `-n`, `--dry-run` | Preview every step without changing anything. |
+| `-y`, `--yes` | Skip the confirmation prompt (non-interactive). |
+| `--no-start` | Do not enable/start the `docker` systemd service. |
+| `--no-group` | Do not add the current user to the `docker` group. |
+| `-h`, `--help` | Print the script's built-in help. |
+
+> 💡 Supported: **Ubuntu / Debian** (apt) and **Fedora / RHEL / CentOS** (dnf). Run as `root` or with
+> `sudo`. After install, log out/in (or run `newgrp docker`) to use Docker without `sudo`, then verify
+> with `docker run hello-world`.
+
+---
+
 ## 🗂 Repository structure
 
 ```text
 toolkit/
 ├── assets/
 │   └── logo.svg
+├── linux/
+│   └── install-docker.sh
 ├── proxmox/
 │   └── proxmox-wipe.sh
 ├── README.md        # English (this file)

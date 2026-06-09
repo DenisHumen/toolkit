@@ -34,6 +34,7 @@
 | Скрипт | Категория | Что делает |
 |---|---|---|
 | [`proxmox-wipe.sh`](#proxmox-wipesh) | Proxmox | Уничтожает всех гостей и обнуляет все несистемные диски, с живым прогресс-баром и ETA. |
+| [`install-docker.sh`](#install-dockersh) | Linux | Автоопределяет дистрибутив и ставит Docker Engine + Compose v2 из официальных репозиториев Docker. |
 
 > 📌 Эта таблица пополняется по мере добавления новых скриптов.
 
@@ -82,12 +83,57 @@ sudo ./proxmox/proxmox-wipe.sh --dry-run
 
 ---
 
+### `install-docker.sh`
+
+> 🐳 Единый установщик **Docker Engine + Docker Compose v2**, который определяет дистрибутив и запускает нужный официальный путь — apt на Ubuntu/Debian, dnf на Fedora/RHEL/CentOS.
+
+**Расположение:** [`linux/install-docker.sh`](linux/install-docker.sh)
+
+Читает `/etc/os-release`, выбирает нужный пакетный менеджер и репозиторий Docker, затем ставит один
+и тот же официальный набор пакетов везде — `docker-ce`, `docker-ce-cli`, `containerd.io`,
+`docker-buildx-plugin` и `docker-compose-plugin` (Compose v2, вызывается как `docker compose`). Также
+включает службу и добавляет вашего пользователя в группу `docker`. Следует официальным шагам
+[docs.docker.com](https://docs.docker.com/engine/install/).
+
+#### ▶️ Запуск
+
+```bash
+chmod +x linux/install-docker.sh
+sudo ./linux/install-docker.sh --dry-run
+```
+
+#### Команды
+
+| Команда | Назначение |
+|---|---|
+| `./install-docker.sh --dry-run` | **Только предпросмотр.** Печатает определённый дистрибутив и все команды, которые будут выполнены — ничего не меняется. Запускайте это первым. |
+| `./install-docker.sh` | Установить Docker после интерактивного подтверждения. |
+| `./install-docker.sh --yes` | Установить без вопросов (считать ответ «да») — удобно для автоматизации. |
+
+#### Опции
+
+| Флаг | Описание |
+|---|---|
+| `-n`, `--dry-run` | Предпросмотр всех шагов без каких-либо изменений. |
+| `-y`, `--yes` | Пропустить запрос подтверждения (неинтерактивно). |
+| `--no-start` | Не включать/не запускать службу `docker` (systemd). |
+| `--no-group` | Не добавлять текущего пользователя в группу `docker`. |
+| `-h`, `--help` | Показать встроенную справку скрипта. |
+
+> 💡 Поддерживаются: **Ubuntu / Debian** (apt) и **Fedora / RHEL / CentOS** (dnf). Запускайте от `root`
+> или через `sudo`. После установки перелогиньтесь (или выполните `newgrp docker`), чтобы
+> использовать Docker без `sudo`, и проверьте командой `docker run hello-world`.
+
+---
+
 ## 🗂 Структура репозитория
 
 ```text
 toolkit/
 ├── assets/
 │   └── logo.svg
+├── linux/
+│   └── install-docker.sh
 ├── proxmox/
 │   └── proxmox-wipe.sh
 ├── README.md        # English
