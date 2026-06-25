@@ -35,6 +35,7 @@
 |---|---|---|
 | [`proxmox-wipe.sh`](#proxmox-wipesh) | Proxmox | Уничтожает всех гостей и обнуляет все несистемные диски, с живым прогресс-баром и ETA. |
 | [`install-docker.sh`](#install-dockersh) | Linux | Автоопределяет дистрибутив и ставит Docker Engine + Compose v2 из официальных репозиториев Docker. |
+| [`install-pingvin-share.sh`](#install-pingvin-sharesh) | Linux | Разворачивает Pingvin Share через Docker за обратным прокси Caddy с автоматическим HTTPS и открывает фаервол. |
 
 > 📌 Эта таблица пополняется по мере добавления новых скриптов.
 
@@ -126,6 +127,63 @@ sudo ./linux/install-docker.sh --dry-run
 
 ---
 
+### `install-pingvin-share.sh`
+
+> 🐧 Единый установщик, который разворачивает **Pingvin Share** (self-hosted обмен файлами) через Docker Compose и публикует его **на вашем домене с автоматическим HTTPS**, вместе с фаерволом.
+
+**Расположение:** [`linux/install-pingvin-share.sh`](linux/install-pingvin-share.sh)
+
+Определяет семейство дистрибутива, проверяет наличие Docker + Compose v2 — и если их нет, запускает
+[`install-docker.sh`](#install-dockersh) из этого же репозитория (локальный файл рядом или скачивает
+с GitHub). По умолчанию разворачивает стек **Pingvin Share + обратный прокси Caddy**, который сам
+получает бесплатный сертификат Let's Encrypt для вашего `--domain` (без certbot и ручного продления),
+выставляет `TRUST_PROXY=true`, открывает **80/443** в фаерволе (`ufw` на apt-дистрибутивах,
+`firewalld` на dnf), помечает тома для SELinux и поднимает всё. Флаг `--no-proxy` публикует Pingvin
+Share напрямую на порту (без TLS — для использования за уже существующим прокси).
+
+#### ▶️ Запуск
+
+```bash
+chmod +x linux/install-pingvin-share.sh
+# С доступом из интернета, HTTPS на вашем домене (сначала предпросмотр):
+sudo ./linux/install-pingvin-share.sh --domain share.example.com --email you@example.com --dry-run
+sudo ./linux/install-pingvin-share.sh --domain share.example.com --email you@example.com
+```
+
+> Направьте **A/AAAA-запись домена на сервер** и убедитесь, что порты **80 + 443** доступны из
+> интернета *до* запуска — они нужны Caddy для выпуска сертификата.
+
+#### Команды
+
+| Команда | Назначение |
+|---|---|
+| `./install-pingvin-share.sh --domain d.tld --dry-run` | **Только предпросмотр.** Печатает определённый дистрибутив и все файлы/команды — ничего не меняется. Запускайте это первым. |
+| `./install-pingvin-share.sh --domain d.tld --email you@d.tld` | Установка за Caddy с автоматическим HTTPS для `d.tld`. |
+| `./install-pingvin-share.sh --no-proxy --port 3000` | Установить только Pingvin Share, опубликовав напрямую на порту (без TLS). |
+
+#### Опции
+
+| Флаг | Описание |
+|---|---|
+| `-d`, `--domain <fqdn>` | Домен для публикации (обязателен, если не указан `--no-proxy`). |
+| `-e`, `--email <addr>` | Email для Let's Encrypt / ACME (рекомендуется в режиме прокси). |
+| `-p`, `--port <port>` | Порт хоста для прямого режима (по умолчанию `3000`, только с `--no-proxy`). |
+| `--dir <path>` | Каталог установки (по умолчанию `/opt/pingvin-share`). |
+| `--image <ref>` | Образ контейнера (по умолчанию `stonith404/pingvin-share`). |
+| `--no-proxy` | Не использовать Caddy/HTTPS, опубликовать Pingvin Share напрямую на `--port`. |
+| `--no-firewall` | Не трогать фаервол. |
+| `-n`, `--dry-run` | Предпросмотр всех шагов без каких-либо изменений. |
+| `-y`, `--yes` | Пропустить запрос подтверждения (неинтерактивно). |
+| `-h`, `--help` | Показать встроенную справку скрипта. |
+
+> 💡 Поддерживаются: **Ubuntu / Debian** и **Fedora / RHEL / CentOS**. Запускайте от `root` или через
+> `sudo`. Первый зарегистрированный аккаунт становится администратором; затем откройте **Configuration**
+> и задайте *App URL* (`https://<домен>`) и максимальный размер передачи. Управление стеком из каталога
+> установки: `docker compose logs -f`, `docker compose pull && docker compose up -d` (обновление),
+> `docker compose down` (остановка).
+
+---
+
 ## 🗂 Структура репозитория
 
 ```text
@@ -133,7 +191,8 @@ toolkit/
 ├── assets/
 │   └── logo.svg
 ├── linux/
-│   └── install-docker.sh
+│   ├── install-docker.sh
+│   └── install-pingvin-share.sh
 ├── proxmox/
 │   └── proxmox-wipe.sh
 ├── README.md        # English

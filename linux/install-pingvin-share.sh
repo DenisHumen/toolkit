@@ -268,7 +268,7 @@ EOF
 configure_firewall() {
     [ "$CONFIGURE_FW" -eq 1 ] || { info "Skipping firewall configuration (--no-firewall)."; return; }
     if [ "$FW" = "ufw" ]; then
-        command -v ufw >/dev/null 2>&1 || run "$SUDO apt-get update && DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y ufw"
+        command -v ufw >/dev/null 2>&1 || run "$SUDO apt-get update && $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y ufw"
         info "Allowing SSH first so we don't lock ourselves out..."
         run "$SUDO ufw allow OpenSSH || $SUDO ufw allow 22/tcp"
         if [ "$USE_PROXY" -eq 1 ]; then

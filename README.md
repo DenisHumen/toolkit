@@ -34,6 +34,7 @@ script gets its own block** with a short description and the commands to run it.
 |---|---|---|
 | [`proxmox-wipe.sh`](#proxmox-wipesh) | Proxmox | Destroys all guests and zeroes every non-system disk, with a live progress bar + ETA. |
 | [`install-docker.sh`](#install-dockersh) | Linux | Auto-detects the distro and installs Docker Engine + Compose v2 from Docker's official repos. |
+| [`install-pingvin-share.sh`](#install-pingvin-sharesh) | Linux | Deploys Pingvin Share via Docker behind a Caddy reverse proxy with automatic HTTPS, and opens the firewall. |
 
 > 📌 This table grows as new scripts are added.
 
@@ -124,6 +125,62 @@ sudo ./linux/install-docker.sh --dry-run
 
 ---
 
+### `install-pingvin-share.sh`
+
+> 🐧 One installer that deploys **Pingvin Share** (self-hosted file sharing) with Docker Compose, served on **your own domain with automatic HTTPS**, firewall and all.
+
+**Location:** [`linux/install-pingvin-share.sh`](linux/install-pingvin-share.sh)
+
+Detects the distro family, makes sure Docker + Compose v2 are present — and if they are not, it runs
+[`install-docker.sh`](#install-dockersh) from this same repo (the local sibling file, or downloaded
+from GitHub). By default it writes a stack with **Pingvin Share + a Caddy reverse proxy** that obtains
+a free Let's Encrypt certificate for your `--domain` automatically (no certbot, no manual renewals),
+sets `TRUST_PROXY=true`, opens **80/443** in the firewall (`ufw` on apt distros, `firewalld` on dnf),
+labels volumes for SELinux, then brings everything up. Use `--no-proxy` to publish Pingvin Share
+directly on a port instead (no TLS — for use behind an existing proxy).
+
+#### ▶️ Run
+
+```bash
+chmod +x linux/install-pingvin-share.sh
+# Internet-facing, HTTPS on your domain (preview first):
+sudo ./linux/install-pingvin-share.sh --domain share.example.com --email you@example.com --dry-run
+sudo ./linux/install-pingvin-share.sh --domain share.example.com --email you@example.com
+```
+
+> Point your domain's **A/AAAA record at the server** and make sure ports **80 + 443** are reachable
+> from the internet *before* running — Caddy needs them to issue the certificate.
+
+#### Commands
+
+| Command | Purpose |
+|---|---|
+| `./install-pingvin-share.sh --domain d.tld --dry-run` | **Preview only.** Prints the detected distro and every file/command — nothing is changed. Run this first. |
+| `./install-pingvin-share.sh --domain d.tld --email you@d.tld` | Install behind Caddy with automatic HTTPS for `d.tld`. |
+| `./install-pingvin-share.sh --no-proxy --port 3000` | Install Pingvin Share only, published directly on a port (no TLS). |
+
+#### Options
+
+| Flag | Description |
+|---|---|
+| `-d`, `--domain <fqdn>` | Domain to serve on (required unless `--no-proxy`). |
+| `-e`, `--email <addr>` | Email for Let's Encrypt / ACME (recommended in proxy mode). |
+| `-p`, `--port <port>` | Host port for direct mode (default `3000`, only with `--no-proxy`). |
+| `--dir <path>` | Install directory (default `/opt/pingvin-share`). |
+| `--image <ref>` | Container image (default `stonith404/pingvin-share`). |
+| `--no-proxy` | Skip Caddy/HTTPS, publish Pingvin Share directly on `--port`. |
+| `--no-firewall` | Do not touch the firewall. |
+| `-n`, `--dry-run` | Preview every step without changing anything. |
+| `-y`, `--yes` | Skip the confirmation prompt (non-interactive). |
+| `-h`, `--help` | Print the script's built-in help. |
+
+> 💡 Supported: **Ubuntu / Debian** and **Fedora / RHEL / CentOS**. Run as `root` or with `sudo`. The
+> first account you register becomes the admin; afterwards open **Configuration** and set the *App URL*
+> (`https://<domain>`) and the max share size. Manage the stack from the install dir with
+> `docker compose logs -f`, `docker compose pull && docker compose up -d` (update), `docker compose down` (stop).
+
+---
+
 ## 🗂 Repository structure
 
 ```text
@@ -131,7 +188,8 @@ toolkit/
 ├── assets/
 │   └── logo.svg
 ├── linux/
-│   └── install-docker.sh
+│   ├── install-docker.sh
+│   └── install-pingvin-share.sh
 ├── proxmox/
 │   └── proxmox-wipe.sh
 ├── README.md        # English (this file)
