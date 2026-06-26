@@ -179,6 +179,7 @@ sudo ./linux/install-pingvin-share.sh --domain share.example.com --email you@exa
 | `--staging` | Use the Let's Encrypt **staging** CA (no rate limits, for testing). |
 | `--self-signed` | Use Caddy's internal CA — instant HTTPS with a browser warning. |
 | `--purge-data` | With `--uninstall`/`--reinstall`, also delete uploads + database. |
+| `--reset-tls` | With `--uninstall`/`--reinstall`, also wipe Caddy's stored certificate/account (forces a fresh issuance). |
 | `-n`, `--dry-run` | Preview every step without changing anything. |
 | `-y`, `--yes` | Skip the confirmation prompt (non-interactive). |
 | `-h`, `--help` | Print the script's built-in help. |
@@ -198,6 +199,12 @@ internet on ports 80 and 443**. If `--status` shows no certificate, check, in or
 
 To get a working endpoint immediately (e.g. behind a CDN, or just to confirm the app itself works),
 use `--self-signed` — Caddy serves HTTPS with its own CA (the browser shows a one-time warning).
+
+> ⚠️ A **"Caddy Local Authority"** certificate (≈12 h validity, browser warning) means `--self-signed`
+> is in effect. To switch back to a real Let's Encrypt certificate, reinstall **without**
+> `--self-signed`; add `--reset-tls` to discard the cached self-signed cert and force a fresh request:
+> `sudo ./linux/install-pingvin-share.sh --reinstall --reset-tls --domain d.tld --email you@d.tld`.
+> `--reinstall` keeps your uploads and a valid certificate by default, so it is safe to re-run.
 
 > 💡 Supported: **Ubuntu / Debian** and **Fedora / RHEL / CentOS**. Run as `root` or with `sudo`. The
 > first account you register becomes the admin; afterwards open **Configuration** and set the *App URL*

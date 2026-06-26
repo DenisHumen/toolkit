@@ -22,7 +22,8 @@
 #      printing actionable diagnostics if Let's Encrypt cannot reach the host.
 #
 # Actions (pick one; default is install):
-#       --reinstall       tear the stack down and install it again from scratch
+#       --reinstall       recreate the stack from fresh config; keeps uploads AND the
+#                         TLS certificate by default (add --purge-data / --reset-tls)
 #       --uninstall       stop and remove the stack (keeps ./data unless --purge-data)
 #       --status          show container, certificate and DNS/reachability status
 #
@@ -38,6 +39,8 @@
 #       --self-signed     use Caddy's internal CA (instant HTTPS, browser warning;
 #                         handy behind a CDN or when public ACME is impossible)
 #       --purge-data      with --uninstall/--reinstall, also delete uploads + database
+#       --reset-tls       with --uninstall/--reinstall, also wipe Caddy's stored
+#                         certificates/account (forces a fresh certificate request)
 #   -n, --dry-run         preview every step, change NOTHING
 #   -y, --yes             non-interactive (assume "yes")
 #   -h, --help            show this help
@@ -55,7 +58,7 @@ set -euo pipefail
 
 ACTION="install"   # install | reinstall | uninstall | status
 DRY_RUN=0; ASSUME_YES=0; USE_PROXY=1; CONFIGURE_FW=1
-STAGING=0; SELF_SIGNED=0; PURGE_DATA=0
+STAGING=0; SELF_SIGNED=0; PURGE_DATA=0; RESET_TLS=0
 DOMAIN=""; EMAIL=""; PORT="3000"
 INSTALL_DIR="/opt/pingvin-share"
 IMAGE="stonith404/pingvin-share"
@@ -85,6 +88,7 @@ while [ $# -gt 0 ]; do
         --staging)    STAGING=1 ;;
         --self-signed) SELF_SIGNED=1 ;;
         --purge-data) PURGE_DATA=1 ;;
+        --reset-tls)  RESET_TLS=1 ;;
         -n|--dry-run) DRY_RUN=1 ;;
         -y|--yes)     ASSUME_YES=1 ;;
         -h|--help)    grep '^#' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
@@ -339,13 +343,32 @@ start_stack() {
 }
 
 # ---- tear the stack down ----
+# By default this keeps the named volumes (Caddy's certificates + ACME account) so
+# repeated reinstalls don't re-request certificates and risk Let's Encrypt rate
+# limits. Pass --reset-tls to wipe them and force a completely fresh issuance.
 stop_stack() {
+    local downflags="--remove-orphans"
+    [ "$RESET_TLS" -eq 1 ] && downflags="-v --remove-orphans"
     if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
-        run "$COMPOSE down -v --remove-orphans || true"
+        run "$COMPOSE down $downflags || true"
     else
         info "No compose file in $INSTALL_DIR — removing containers by name (if any)."
         run "$SUDO docker rm -f pingvin-share pingvin-caddy >/dev/null 2>&1 || true"
+        if [ "$RESET_TLS" -eq 1 ]; then
+            local proj; proj="$(basename "$INSTALL_DIR")"
+            run "$SUDO docker volume rm '${proj}_caddy_data' '${proj}_caddy_config' >/dev/null 2>&1 || true"
+        fi
     fi
+    [ "$RESET_TLS" -eq 1 ] && info "TLS state wiped — Caddy will request a brand-new certificate."
+}
+
+# ---- which kind of certificate has Caddy stored? prod | staging | internal | none ----
+caddy_cert_kind() {
+    $SUDO docker exec pingvin-caddy sh -c '
+        if find /data/caddy/certificates -path "*acme-staging*" -name "*.crt" 2>/dev/null | grep -q .; then echo staging;
+        elif find /data/caddy/certificates -path "*acme-v02*" -name "*.crt" 2>/dev/null | grep -q .; then echo prod;
+        elif find /data/caddy/certificates -path "*/local/*" -name "*.crt" 2>/dev/null | grep -q .; then echo internal;
+        else echo none; fi' 2>/dev/null || echo none
 }
 
 # ---- diagnostics when the certificate cannot be issued ----
@@ -366,9 +389,9 @@ tls_troubleshoot() {
     warn "     These two must match."
     warn "  3) Let's Encrypt rate-limited you after repeated failures."
     warn ""
-    warn "  Re-check status:  sudo $0 --status --domain $DOMAIN"
-    warn "  Test, no limits:  sudo $0 --reinstall --staging --domain $DOMAIN${EMAIL:+ --email $EMAIL}"
-    warn "  Instant HTTPS  :  sudo $0 --reinstall --self-signed --domain $DOMAIN"
+    warn "  Re-check status :  sudo $0 --status --domain $DOMAIN"
+    warn "  Test, no limits :  sudo $0 --reinstall --staging --domain $DOMAIN${EMAIL:+ --email $EMAIL}"
+    warn "  Untrusted HTTPS :  sudo $0 --reinstall --self-signed --domain $DOMAIN  (browser warning)"
     warn "----------------------------------------------------------------"
 }
 
@@ -380,19 +403,27 @@ verify_deploy() {
         ok "Self-signed TLS is active (Caddy internal CA). Browsers will warn — expected."
         return 0
     fi
+    local want="prod"; [ "$STAGING" -eq 1 ] && want="staging"
     info "Waiting for Caddy to obtain the TLS certificate for $DOMAIN (up to ~90s)..."
-    local n=0 got=0
+    local n=0 kind="none"
     while [ "$n" -lt 30 ]; do
-        if $SUDO docker exec pingvin-caddy sh -c 'find /data/caddy/certificates -name "*.crt" 2>/dev/null | grep -q .' 2>/dev/null; then
-            got=1; break
-        fi
+        kind="$(caddy_cert_kind)"
+        [ "$kind" = "$want" ] && break
         n=$((n + 1)); sleep 3
     done
-    if [ "$got" -eq 1 ]; then
-        ok "TLS certificate obtained$( [ "$STAGING" -eq 1 ] && echo ' (STAGING — not trusted by browsers, for testing only)' )."
-    else
-        tls_troubleshoot
-    fi
+    case "$kind" in
+        prod)
+            ok "Let's Encrypt certificate obtained — trusted by browsers." ;;
+        staging)
+            ok "Let's Encrypt STAGING certificate obtained — NOT trusted by browsers."
+            info "Re-run without --staging once DNS/firewall are confirmed:  sudo $0 --reinstall --domain $DOMAIN${EMAIL:+ --email $EMAIL}" ;;
+        internal)
+            warn "Only a self-signed (Caddy internal) certificate is present — this is what a"
+            warn "previous --self-signed run leaves behind, and it is NOT trusted by browsers."
+            warn "Get a real certificate with:  sudo $0 --reinstall --reset-tls --domain $DOMAIN${EMAIL:+ --email $EMAIL}" ;;
+        *)
+            tls_troubleshoot ;;
+    esac
 }
 
 # ---- status / doctor ----
@@ -406,11 +437,13 @@ do_status() {
         --format '  {{.Names}}  {{.Status}}  {{.Ports}}' 2>/dev/null || warn "  (could not query docker)"
     echo
     if $SUDO docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^pingvin-caddy$'; then
-        if $SUDO docker exec pingvin-caddy sh -c 'find /data/caddy/certificates -name "*.crt" 2>/dev/null | grep -q .' 2>/dev/null; then
-            ok "TLS certificate is present in Caddy."
-        else
-            warn "No TLS certificate stored yet."
-        fi
+        case "$(caddy_cert_kind)" in
+            prod)     ok "TLS certificate: Let's Encrypt (trusted)." ;;
+            staging)  warn "TLS certificate: Let's Encrypt STAGING (not trusted — re-run without --staging)." ;;
+            internal) warn "TLS certificate: self-signed / Caddy internal CA (browser warning)."
+                      warn "  For a real one: sudo $0 --reinstall --reset-tls --domain ${DOMAIN:-<domain>}" ;;
+            *)        warn "TLS certificate: none stored yet." ;;
+        esac
     fi
     if [ -n "$DOMAIN" ]; then
         local resolved public
@@ -466,10 +499,14 @@ case "$ACTION" in
         fi
         echo "  Firewall     : $( [ "$CONFIGURE_FW" -eq 1 ] && echo "configure ($FW)" || echo "leave untouched" )"
         echo "  SELinux label: $( [ -n "$VOL_OPT" ] && echo "yes (:z)" || echo "no" )"
-        [ "$ACTION" = "reinstall" ] && echo "  Existing data: $( [ "$PURGE_DATA" -eq 1 ] && echo 'DELETE (--purge-data)' || echo 'keep ./data' )"
+        if [ "$ACTION" = "reinstall" ]; then
+            echo "  Existing data: $( [ "$PURGE_DATA" -eq 1 ] && echo 'DELETE (--purge-data)' || echo 'keep ./data' )"
+            echo "  TLS state    : $( [ "$RESET_TLS" -eq 1 ] && echo 'wipe & re-issue (--reset-tls)' || echo 'keep stored certificate' )"
+        fi
         ;;
     uninstall)
         echo "  Data         : $( [ "$PURGE_DATA" -eq 1 ] && echo 'DELETE uploads + database (--purge-data)' || echo 'keep ./data' )"
+        echo "  TLS state    : $( [ "$RESET_TLS" -eq 1 ] && echo 'wipe certificates (--reset-tls)' || echo 'keep stored certificate volumes' )"
         ;;
 esac
 echo "============================================================"
