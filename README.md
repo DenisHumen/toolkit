@@ -157,12 +157,18 @@ sudo ./linux/install-pingvin-share.sh --domain share.example.com --email you@exa
 |---|---|
 | `./install-pingvin-share.sh --domain d.tld --dry-run` | **Preview only.** Prints the detected distro and every file/command — nothing is changed. Run this first. |
 | `./install-pingvin-share.sh --domain d.tld --email you@d.tld` | Install behind Caddy with automatic HTTPS for `d.tld`. |
+| `./install-pingvin-share.sh --reinstall --domain d.tld --email you@d.tld` | Tear the stack down and install it again from scratch (keeps `./data`). |
+| `./install-pingvin-share.sh --status --domain d.tld` | Show container, certificate and DNS/reachability status. |
+| `./install-pingvin-share.sh --uninstall` | Stop and remove the stack (keeps uploads + database). |
 | `./install-pingvin-share.sh --no-proxy --port 3000` | Install Pingvin Share only, published directly on a port (no TLS). |
 
 #### Options
 
 | Flag | Description |
 |---|---|
+| `--reinstall` | Action: tear down and install again from scratch. |
+| `--uninstall` | Action: stop and remove the stack (keeps `./data` unless `--purge-data`). |
+| `--status` | Action: print container, certificate and DNS/reachability status. |
 | `-d`, `--domain <fqdn>` | Domain to serve on (required unless `--no-proxy`). |
 | `-e`, `--email <addr>` | Email for Let's Encrypt / ACME (recommended in proxy mode). |
 | `-p`, `--port <port>` | Host port for direct mode (default `3000`, only with `--no-proxy`). |
@@ -170,14 +176,33 @@ sudo ./linux/install-pingvin-share.sh --domain share.example.com --email you@exa
 | `--image <ref>` | Container image (default `stonith404/pingvin-share`). |
 | `--no-proxy` | Skip Caddy/HTTPS, publish Pingvin Share directly on `--port`. |
 | `--no-firewall` | Do not touch the firewall. |
+| `--staging` | Use the Let's Encrypt **staging** CA (no rate limits, for testing). |
+| `--self-signed` | Use Caddy's internal CA — instant HTTPS with a browser warning. |
+| `--purge-data` | With `--uninstall`/`--reinstall`, also delete uploads + database. |
 | `-n`, `--dry-run` | Preview every step without changing anything. |
 | `-y`, `--yes` | Skip the confirmation prompt (non-interactive). |
 | `-h`, `--help` | Print the script's built-in help. |
 
+#### 🔐 If HTTPS doesn't come up
+
+Caddy gets a free Let's Encrypt certificate **only if Let's Encrypt can reach your server from the
+internet on ports 80 and 443**. If `--status` shows no certificate, check, in order:
+
+1. **Cloud firewall / security group.** This script opens the *OS* firewall, but most providers (AWS,
+   GCP, **Oracle Cloud**, Hetzner, Azure…) have a **separate** firewall you must open in their web
+   console — allow inbound **TCP 80 and 443** there too.
+2. **DNS.** The domain's **A/AAAA record must point at this exact server** — `--status` prints the
+   resolved IP next to the host's public IP so you can compare them.
+3. **Rate limits.** While debugging, use `--staging` to avoid Let's Encrypt's limits; once it works,
+   re-run without `--staging` for a trusted certificate.
+
+To get a working endpoint immediately (e.g. behind a CDN, or just to confirm the app itself works),
+use `--self-signed` — Caddy serves HTTPS with its own CA (the browser shows a one-time warning).
+
 > 💡 Supported: **Ubuntu / Debian** and **Fedora / RHEL / CentOS**. Run as `root` or with `sudo`. The
 > first account you register becomes the admin; afterwards open **Configuration** and set the *App URL*
-> (`https://<domain>`) and the max share size. Manage the stack from the install dir with
-> `docker compose logs -f`, `docker compose pull && docker compose up -d` (update), `docker compose down` (stop).
+> (`https://<domain>`) and the max share size. The compose file lives in the install dir — manage it with
+> `sudo docker compose -f /opt/pingvin-share/docker-compose.yml logs -f` (and `… pull && … up -d` to update).
 
 ---
 

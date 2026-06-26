@@ -4,9 +4,10 @@
 #
 # Deploys Pingvin Share (a self-hosted file-sharing platform) with Docker
 # Compose on any of the common Linux families, ready to be reached over the
-# internet through your own domain with automatic HTTPS.
+# internet through your own domain with automatic HTTPS — and lets you
+# reinstall, uninstall or check its status with the same script.
 #
-# What it does:
+# What it does (install, the default action):
 #   1. Detects the distro family from /etc/os-release (Ubuntu/Debian, Fedora/RHEL).
 #   2. Ensures Docker Engine + Compose v2 are present — if not, it runs
 #      install-docker.sh from this same repository (the local sibling file if
@@ -17,14 +18,15 @@
 #        * --no-proxy: Pingvin Share only, published directly on --port (no TLS).
 #   4. Opens the required ports in the firewall (ufw on apt distros, firewalld
 #      on dnf distros) without locking out SSH, and labels volumes for SELinux.
-#   5. Pulls the images and starts the stack with `docker compose up -d`.
+#   5. Pulls the images, starts the stack and verifies the TLS certificate,
+#      printing actionable diagnostics if Let's Encrypt cannot reach the host.
 #
-# Usage:
-#   ./install-pingvin-share.sh --domain share.example.com --email you@example.com
-#   ./install-pingvin-share.sh --no-proxy --port 3000
-#   ./install-pingvin-share.sh --domain share.example.com --dry-run
+# Actions (pick one; default is install):
+#       --reinstall       tear the stack down and install it again from scratch
+#       --uninstall       stop and remove the stack (keeps ./data unless --purge-data)
+#       --status          show container, certificate and DNS/reachability status
 #
-# Options:
+# Install options:
 #   -d, --domain <fqdn>   domain to serve Pingvin Share on (required unless --no-proxy)
 #   -e, --email  <addr>   email for Let's Encrypt / ACME (recommended in proxy mode)
 #   -p, --port   <port>   host port for direct mode (default: 3000, only with --no-proxy)
@@ -32,15 +34,28 @@
 #       --image  <ref>    container image (default: stonith404/pingvin-share)
 #       --no-proxy        skip Caddy/HTTPS, publish Pingvin Share directly on --port
 #       --no-firewall     do not touch the firewall
+#       --staging         use the Let's Encrypt STAGING CA (no rate limits, for testing)
+#       --self-signed     use Caddy's internal CA (instant HTTPS, browser warning;
+#                         handy behind a CDN or when public ACME is impossible)
+#       --purge-data      with --uninstall/--reinstall, also delete uploads + database
 #   -n, --dry-run         preview every step, change NOTHING
 #   -y, --yes             non-interactive (assume "yes")
 #   -h, --help            show this help
+#
+# Examples:
+#   ./install-pingvin-share.sh --domain share.example.com --email you@example.com
+#   ./install-pingvin-share.sh --reinstall --domain share.example.com --staging
+#   ./install-pingvin-share.sh --reinstall --self-signed --domain share.example.com
+#   ./install-pingvin-share.sh --status --domain share.example.com
+#   ./install-pingvin-share.sh --uninstall --purge-data
 #
 # Run as root, or as a user with sudo privileges.
 #
 set -euo pipefail
 
+ACTION="install"   # install | reinstall | uninstall | status
 DRY_RUN=0; ASSUME_YES=0; USE_PROXY=1; CONFIGURE_FW=1
+STAGING=0; SELF_SIGNED=0; PURGE_DATA=0
 DOMAIN=""; EMAIL=""; PORT="3000"
 INSTALL_DIR="/opt/pingvin-share"
 IMAGE="stonith404/pingvin-share"
@@ -52,6 +67,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --reinstall)  ACTION="reinstall" ;;
+        --uninstall)  ACTION="uninstall" ;;
+        --status)     ACTION="status" ;;
         -d|--domain)  DOMAIN="${2:?--domain requires a value}"; shift ;;
         --domain=*)   DOMAIN="${1#*=}" ;;
         -e|--email)   EMAIL="${2:?--email requires a value}"; shift ;;
@@ -64,6 +82,9 @@ while [ $# -gt 0 ]; do
         --image=*)    IMAGE="${1#*=}" ;;
         --no-proxy)   USE_PROXY=0 ;;
         --no-firewall) CONFIGURE_FW=0 ;;
+        --staging)    STAGING=1 ;;
+        --self-signed) SELF_SIGNED=1 ;;
+        --purge-data) PURGE_DATA=1 ;;
         -n|--dry-run) DRY_RUN=1 ;;
         -y|--yes)     ASSUME_YES=1 ;;
         -h|--help)    grep '^#' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
@@ -113,33 +134,41 @@ else
     SUDO="sudo"
 fi
 
+# Compose wrapper bound to the install dir's file.
+COMPOSE="$SUDO docker compose -f '$INSTALL_DIR/docker-compose.yml'"
+
 # ---- validate arguments ----
-if [ "$USE_PROXY" -eq 1 ] && [ -z "$DOMAIN" ]; then
-    die "A --domain is required for HTTPS via the reverse proxy. Pass --domain <fqdn>, or use --no-proxy to publish Pingvin Share directly on a port without TLS."
+if [ "$ACTION" = "install" ] || [ "$ACTION" = "reinstall" ]; then
+    if [ "$USE_PROXY" -eq 1 ] && [ -z "$DOMAIN" ]; then
+        die "A --domain is required for HTTPS via the reverse proxy. Pass --domain <fqdn>, or use --no-proxy to publish Pingvin Share directly on a port without TLS."
+    fi
+    case "$PORT" in
+        ''|*[!0-9]*) die "Invalid --port: '$PORT' (must be a number)." ;;
+    esac
+    if [ "$STAGING" -eq 1 ] && [ "$SELF_SIGNED" -eq 1 ]; then
+        die "Use either --staging or --self-signed, not both."
+    fi
 fi
-case "$PORT" in
-    ''|*[!0-9]*) die "Invalid --port: '$PORT' (must be a number)." ;;
-esac
 
-# ---- detect distribution ----
-[ -r /etc/os-release ] || die "Cannot read /etc/os-release — unsupported system."
-# shellcheck disable=SC1091
-. /etc/os-release
-OS_ID="${ID:-}"
-OS_LIKE="${ID_LIKE:-}"
-
-PM=""            # package manager: apt | dnf
-FW=""            # firewall front-end: ufw | firewalld
-case "$OS_ID" in
-    ubuntu|debian)                  PM="apt"; FW="ufw" ;;
-    fedora|rhel|centos|rocky|almalinux) PM="dnf"; FW="firewalld" ;;
-    *)
-        case " $OS_LIKE " in
-            *ubuntu*|*debian*)        PM="apt"; FW="ufw" ;;
-            *fedora*|*rhel*|*centos*) PM="dnf"; FW="firewalld" ;;
-        esac ;;
-esac
-[ -n "$PM" ] || die "Unsupported distribution: ${PRETTY_NAME:-$OS_ID}. Supported: Ubuntu/Debian, Fedora/RHEL/CentOS."
+# ---- detect distribution (needed for install/reinstall; best-effort otherwise) ----
+PM=""; FW=""; OS_PRETTY=""
+if [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    OS_PRETTY="${PRETTY_NAME:-${ID:-unknown}}"
+    case "${ID:-}" in
+        ubuntu|debian)                      PM="apt"; FW="ufw" ;;
+        fedora|rhel|centos|rocky|almalinux) PM="dnf"; FW="firewalld" ;;
+        *)
+            case " ${ID_LIKE:-} " in
+                *ubuntu*|*debian*)        PM="apt"; FW="ufw" ;;
+                *fedora*|*rhel*|*centos*) PM="dnf"; FW="firewalld" ;;
+            esac ;;
+    esac
+fi
+if [ "$ACTION" = "install" ] || [ "$ACTION" = "reinstall" ]; then
+    [ -n "$PM" ] || die "Unsupported distribution: ${OS_PRETTY:-unknown}. Supported: Ubuntu/Debian, Fedora/RHEL/CentOS."
+fi
 
 # ---- SELinux-aware volume label (no-op on systems without SELinux) ----
 VOL_OPT=""
@@ -171,20 +200,38 @@ ensure_docker() {
     fi
 }
 
+# ---- public IP / DNS helpers ----
+public_ip() { curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null || true; }
+resolve_ip() { command -v getent >/dev/null 2>&1 && getent ahostsv4 "$1" 2>/dev/null | awk 'NR==1{print $1}'; }
+
 # ---- best-effort DNS sanity check (non-fatal) ----
 dns_check() {
     [ "$USE_PROXY" -eq 1 ] || return 0
     [ "$DRY_RUN" -eq 0 ] || return 0
-    command -v getent >/dev/null 2>&1 || return 0
     local resolved public
-    resolved="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')" || true
-    public="$(curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null)" || true
+    resolved="$(resolve_ip "$DOMAIN")" || true
+    public="$(public_ip)"
     if [ -n "$resolved" ] && [ -n "$public" ] && [ "$resolved" != "$public" ]; then
         warn "DNS: $DOMAIN -> $resolved, but this host's public IP looks like $public."
         warn "     HTTPS issuance will fail until the domain's A/AAAA record points here."
     elif [ -z "$resolved" ]; then
         warn "DNS: could not resolve $DOMAIN — make sure its A/AAAA record points to this server."
     fi
+}
+
+# ---- Caddyfile content ----
+build_caddyfile() {
+    if [ "$SELF_SIGNED" -eq 1 ]; then
+        printf '%s {\n    tls internal\n    reverse_proxy pingvin-share:3000\n}\n' "$DOMAIN"
+        return
+    fi
+    if [ -n "$EMAIL" ] || [ "$STAGING" -eq 1 ]; then
+        printf '{\n'
+        [ -n "$EMAIL" ]    && printf '    email %s\n' "$EMAIL"
+        [ "$STAGING" -eq 1 ] && printf '    acme_ca https://acme-staging-v02.api.letsencrypt.org/directory\n'
+        printf '}\n\n'
+    fi
+    printf '%s {\n    reverse_proxy pingvin-share:3000\n}\n' "$DOMAIN"
 }
 
 # ---- compose + config generation ----
@@ -236,14 +283,7 @@ volumes:
   caddy_data:
   caddy_config:
 EOF
-
-        local email_block=""
-        [ -n "$EMAIL" ] && email_block=$'{\n    email '"$EMAIL"$'\n}\n\n'
-        write_file "$INSTALL_DIR/Caddyfile" <<EOF
-$email_block$DOMAIN {
-    reverse_proxy pingvin-share:3000
-}
-EOF
+        build_caddyfile | write_file "$INSTALL_DIR/Caddyfile"
     else
         write_file "$INSTALL_DIR/docker-compose.yml" <<EOF
 services:
@@ -294,35 +334,153 @@ configure_firewall() {
 
 # ---- bring the stack up ----
 start_stack() {
-    run "$SUDO docker compose -f '$INSTALL_DIR/docker-compose.yml' pull"
-    run "$SUDO docker compose -f '$INSTALL_DIR/docker-compose.yml' up -d"
+    run "$COMPOSE pull"
+    run "$COMPOSE up -d"
 }
 
-# ---- banner + confirmation ----
+# ---- tear the stack down ----
+stop_stack() {
+    if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
+        run "$COMPOSE down -v --remove-orphans || true"
+    else
+        info "No compose file in $INSTALL_DIR — removing containers by name (if any)."
+        run "$SUDO docker rm -f pingvin-share pingvin-caddy >/dev/null 2>&1 || true"
+    fi
+}
+
+# ---- diagnostics when the certificate cannot be issued ----
+tls_troubleshoot() {
+    local resolved public
+    resolved="$(resolve_ip "$DOMAIN")" || true
+    public="$(public_ip)"
+    warn "----------------------------------------------------------------"
+    warn "HTTPS certificate could not be issued for $DOMAIN yet."
+    warn "Caddy keeps retrying in the background. Most common causes:"
+    warn "  1) A CLOUD firewall / security group blocks inbound 80 and 443."
+    warn "     This script opened the OS firewall, but your provider (AWS,"
+    warn "     GCP, Oracle, Hetzner, Azure, ...) usually has a SEPARATE"
+    warn "     firewall you must open in their web console. Allow TCP 80+443."
+    warn "  2) The domain does not point to THIS server:"
+    warn "        $DOMAIN -> ${resolved:-<unresolved>}"
+    warn "        this host public IP -> ${public:-<unknown>}"
+    warn "     These two must match."
+    warn "  3) Let's Encrypt rate-limited you after repeated failures."
+    warn ""
+    warn "  Re-check status:  sudo $0 --status --domain $DOMAIN"
+    warn "  Test, no limits:  sudo $0 --reinstall --staging --domain $DOMAIN${EMAIL:+ --email $EMAIL}"
+    warn "  Instant HTTPS  :  sudo $0 --reinstall --self-signed --domain $DOMAIN"
+    warn "----------------------------------------------------------------"
+}
+
+# ---- wait for and verify the certificate ----
+verify_deploy() {
+    [ "$DRY_RUN" -eq 0 ] || return 0
+    [ "$USE_PROXY" -eq 1 ] || return 0
+    if [ "$SELF_SIGNED" -eq 1 ]; then
+        ok "Self-signed TLS is active (Caddy internal CA). Browsers will warn — expected."
+        return 0
+    fi
+    info "Waiting for Caddy to obtain the TLS certificate for $DOMAIN (up to ~90s)..."
+    local n=0 got=0
+    while [ "$n" -lt 30 ]; do
+        if $SUDO docker exec pingvin-caddy sh -c 'find /data/caddy/certificates -name "*.crt" 2>/dev/null | grep -q .' 2>/dev/null; then
+            got=1; break
+        fi
+        n=$((n + 1)); sleep 3
+    done
+    if [ "$got" -eq 1 ]; then
+        ok "TLS certificate obtained$( [ "$STAGING" -eq 1 ] && echo ' (STAGING — not trusted by browsers, for testing only)' )."
+    else
+        tls_troubleshoot
+    fi
+}
+
+# ---- status / doctor ----
+do_status() {
+    echo
+    echo "=== Pingvin Share status ==="
+    echo "Install dir : $INSTALL_DIR  ($( [ -f "$INSTALL_DIR/docker-compose.yml" ] && echo 'compose present' || echo 'no compose file' ))"
+    echo
+    echo "Containers:"
+    $SUDO docker ps -a --filter name=pingvin-share --filter name=pingvin-caddy \
+        --format '  {{.Names}}  {{.Status}}  {{.Ports}}' 2>/dev/null || warn "  (could not query docker)"
+    echo
+    if $SUDO docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^pingvin-caddy$'; then
+        if $SUDO docker exec pingvin-caddy sh -c 'find /data/caddy/certificates -name "*.crt" 2>/dev/null | grep -q .' 2>/dev/null; then
+            ok "TLS certificate is present in Caddy."
+        else
+            warn "No TLS certificate stored yet."
+        fi
+    fi
+    if [ -n "$DOMAIN" ]; then
+        local resolved public
+        resolved="$(resolve_ip "$DOMAIN")" || true
+        public="$(public_ip)"
+        echo
+        echo "DNS / reachability:"
+        echo "  $DOMAIN -> ${resolved:-<unresolved>}"
+        echo "  this host public IP -> ${public:-<unknown>}"
+        if [ -n "$resolved" ] && [ -n "$public" ] && [ "$resolved" = "$public" ]; then
+            ok "DNS points at this host."
+        elif [ -n "$resolved" ] && [ -n "$public" ]; then
+            warn "DNS does NOT match this host's public IP — fix the A/AAAA record."
+        fi
+    fi
+    echo
+    info "Logs:  sudo docker logs -f pingvin-caddy   |   sudo docker logs -f pingvin-share"
+}
+
+# ============================ dispatch ============================
+
+# ---- status: read-only, no banner/confirmation ----
+if [ "$ACTION" = "status" ]; then
+    do_status
+    exit 0
+fi
+
+# ---- banner ----
 echo
 echo "============================================================"
-echo " Pingvin Share installer$( [ "$DRY_RUN" -eq 1 ] && echo '   *** DRY-RUN ***' )"
+echo " Pingvin Share $ACTION$( [ "$DRY_RUN" -eq 1 ] && echo '   *** DRY-RUN ***' )"
 echo "============================================================"
-echo "  Distribution : ${PRETTY_NAME:-$OS_ID}  (pkg: $PM, fw: $FW)"
-echo "  Image        : $IMAGE"
+echo "  Distribution : ${OS_PRETTY:-unknown}$( [ -n "$PM" ] && echo "  (pkg: $PM, fw: $FW)" )"
 echo "  Install dir  : $INSTALL_DIR"
-if [ "$USE_PROXY" -eq 1 ]; then
-echo "  Mode         : reverse proxy (Caddy) + automatic HTTPS"
-echo "  Domain       : $DOMAIN"
-echo "  ACME email   : ${EMAIL:-<none>}"
-echo "  Ports opened : 80/tcp, 443/tcp, 443/udp"
-else
-echo "  Mode         : direct port publish (no TLS)"
-echo "  Host port    : $PORT  ->  container 3000"
-echo "  Ports opened : ${PORT}/tcp"
-fi
-echo "  Firewall     : $( [ "$CONFIGURE_FW" -eq 1 ] && echo "configure ($FW)" || echo "leave untouched" )"
-echo "  SELinux label: $( [ -n "$VOL_OPT" ] && echo "yes (:z)" || echo "no" )"
+case "$ACTION" in
+    install|reinstall)
+        echo "  Image        : $IMAGE"
+        if [ "$USE_PROXY" -eq 1 ]; then
+            if [ "$SELF_SIGNED" -eq 1 ]; then
+                echo "  Mode         : reverse proxy (Caddy) + self-signed TLS (internal CA)"
+            elif [ "$STAGING" -eq 1 ]; then
+                echo "  Mode         : reverse proxy (Caddy) + Let's Encrypt STAGING"
+            else
+                echo "  Mode         : reverse proxy (Caddy) + automatic HTTPS"
+            fi
+            echo "  Domain       : $DOMAIN"
+            echo "  ACME email   : ${EMAIL:-<none>}"
+            echo "  Ports opened : 80/tcp, 443/tcp, 443/udp"
+        else
+            echo "  Mode         : direct port publish (no TLS)"
+            echo "  Host port    : $PORT  ->  container 3000"
+            echo "  Ports opened : ${PORT}/tcp"
+        fi
+        echo "  Firewall     : $( [ "$CONFIGURE_FW" -eq 1 ] && echo "configure ($FW)" || echo "leave untouched" )"
+        echo "  SELinux label: $( [ -n "$VOL_OPT" ] && echo "yes (:z)" || echo "no" )"
+        [ "$ACTION" = "reinstall" ] && echo "  Existing data: $( [ "$PURGE_DATA" -eq 1 ] && echo 'DELETE (--purge-data)' || echo 'keep ./data' )"
+        ;;
+    uninstall)
+        echo "  Data         : $( [ "$PURGE_DATA" -eq 1 ] && echo 'DELETE uploads + database (--purge-data)' || echo 'keep ./data' )"
+        ;;
+esac
 echo "============================================================"
 echo
 
+# ---- confirmation ----
 if [ "$DRY_RUN" -eq 0 ] && [ "$ASSUME_YES" -eq 0 ]; then
-    printf 'Proceed with the installation? [y/N] '
+    if [ "$ACTION" = "uninstall" ] || [ "$ACTION" = "reinstall" ]; then
+        [ "$PURGE_DATA" -eq 1 ] && warn "This will PERMANENTLY DELETE all uploaded files and the database."
+    fi
+    printf 'Proceed with %s? [y/N] ' "$ACTION"
     read -r ans
     case "$ans" in
         y|Y|yes|YES) ;;
@@ -330,31 +488,59 @@ if [ "$DRY_RUN" -eq 0 ] && [ "$ASSUME_YES" -eq 0 ]; then
     esac
 fi
 
-ensure_docker
-dns_check
-write_stack
-configure_firewall
-start_stack
+# ---- run the chosen action ----
+case "$ACTION" in
+    uninstall)
+        stop_stack
+        if [ "$PURGE_DATA" -eq 1 ]; then
+            run "$SUDO rm -rf '$INSTALL_DIR'"
+        else
+            run "$SUDO rm -f '$INSTALL_DIR/docker-compose.yml' '$INSTALL_DIR/Caddyfile'"
+            info "Kept data in $INSTALL_DIR/data (use --purge-data to remove it)."
+        fi
+        [ "$DRY_RUN" -eq 1 ] && { ok "Dry-run complete. Nothing was changed."; exit 0; }
+        ok "Pingvin Share removed."
+        exit 0
+        ;;
+    reinstall)
+        ensure_docker
+        stop_stack
+        [ "$PURGE_DATA" -eq 1 ] && run "$SUDO rm -rf '$INSTALL_DIR/data'"
+        dns_check
+        write_stack
+        configure_firewall
+        start_stack
+        ;;
+    install)
+        ensure_docker
+        dns_check
+        write_stack
+        configure_firewall
+        start_stack
+        ;;
+esac
 
 if [ "$DRY_RUN" -eq 1 ]; then
     ok "Dry-run complete. Nothing was changed."
     exit 0
 fi
 
+verify_deploy
+
 echo
 ok "Pingvin Share is up."
 if [ "$USE_PROXY" -eq 1 ]; then
     info "Open:  https://$DOMAIN"
-    info "Caddy will obtain a Let's Encrypt certificate on first request — give it"
-    info "a few seconds, and make sure $DOMAIN resolves to this server and that"
-    info "ports 80/443 are reachable from the internet."
+    [ "$SELF_SIGNED" -eq 1 ] && info "(self-signed — your browser will warn; click through to proceed)"
+    [ "$STAGING" -eq 1 ]     && info "(staging cert — browsers won't trust it; re-run without --staging once DNS/firewall are confirmed)"
 else
     info "Open:  http://<server-ip>:$PORT   (no TLS — put it behind a proxy for internet use)"
 fi
 echo
 info "First account you register becomes the admin."
 info "Then open Configuration -> set the App URL$( [ "$USE_PROXY" -eq 1 ] && echo " to https://$DOMAIN" ) and the max share size."
-info "Manage the stack from $INSTALL_DIR:"
-info "  docker compose logs -f          # follow logs"
-info "  docker compose pull && docker compose up -d   # update to the latest image"
-info "  docker compose down             # stop"
+info "Manage the stack (compose file lives in $INSTALL_DIR):"
+info "  sudo docker compose -f $INSTALL_DIR/docker-compose.yml logs -f      # follow logs"
+info "  sudo docker compose -f $INSTALL_DIR/docker-compose.yml pull && \\"
+info "  sudo docker compose -f $INSTALL_DIR/docker-compose.yml up -d        # update"
+info "  sudo $0 --status --domain ${DOMAIN:-<domain>}                       # health/cert check"
