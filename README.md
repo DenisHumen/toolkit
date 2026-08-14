@@ -35,6 +35,7 @@ script gets its own block** with a short description and the commands to run it.
 | [`proxmox-wipe.sh`](#proxmox-wipesh) | Proxmox | Destroys all guests and zeroes every non-system disk, with a live progress bar + ETA. |
 | [`install-docker.sh`](#install-dockersh) | Linux | Auto-detects the distro and installs Docker Engine + Compose v2 from Docker's official repos. |
 | [`install-pingvin-share.sh`](#install-pingvin-sharesh) | Linux | Deploys Pingvin Share via Docker behind a Caddy reverse proxy with automatic HTTPS, and opens the firewall. |
+| [`loadtest`](#loadtest) | Linux | Authorized load / WAF / rate-limit tester — measures how well **your own** site blocks traffic, optionally through a rotating proxy pool. |
 
 > 📌 This table grows as new scripts are added.
 
@@ -213,6 +214,48 @@ use `--self-signed` — Caddy serves HTTPS with its own CA (the browser shows a 
 
 ---
 
+### `loadtest`
+
+> 🐧 **Authorized** load / WAF / rate-limit tester (Python 3, stdlib only, launched from a `.sh`). Generates configurable HTTP load against **your own** site — optionally through a rotating pool of HTTP proxies — and reports how much of it your filtering **blocked**.
+
+**Location:** [`linux/loadtest/`](linux/loadtest/) &nbsp;·&nbsp; full docs: [`linux/loadtest/README.md`](linux/loadtest/README.md)
+
+> ⚠️ **Run only against systems you own or are permitted to test.** Unauthorized load testing is abuse
+> and likely illegal. The tool uses an identifiable `User-Agent`, masks proxy credentials in its report,
+> and requires a one-time authorization confirmation.
+
+Built for validating that **nginx / Apache** rate limiting and WAF rules actually block distributed,
+IP-rotating traffic — with results you can line up against your own Grafana dashboards. It takes proxies
+as `login:passwd@ip:port` (one per line, used in random order), plus duration, per-worker delay and
+concurrency. Run it with no arguments for an interactive **TUI menu + live dashboard**, or pass flags
+(`--k v`, `--k=v` or `--k:v`). The launcher auto-installs Python 3 if missing. Results are written to a
+`.txt` report: pass rate vs. blocked (`401/403/405/406/409/415/429/451`) vs. `5xx` vs. errors, block
+rate, latency percentiles, and a per-proxy block table.
+
+#### ▶️ Run
+
+```bash
+chmod +x linux/loadtest/loadtest.sh
+# interactive TUI menu:
+./linux/loadtest/loadtest.sh
+# or non-interactive (matches the --k:v form):
+./linux/loadtest/loadtest.sh --url https://my.site --proxy:/path/proxies.txt --duration 60s --delay 0.1 --concurrency 50 --yes
+```
+
+| Flag | Description |
+|---|---|
+| `--url`, `--target` | Target URL (required). |
+| `--proxy`, `--proxies` | Proxy list `.txt` (`login:passwd@ip:port` per line, random order). |
+| `--no-proxy`, `--direct` | Send directly from this host (baseline, no proxies). |
+| `--duration`, `--time` | Run length: `90s`, `5m`, `1h` (default `30s`). |
+| `--delay`, `--sleep` | Pause between requests per worker (default `0`). |
+| `--concurrency`, `-c` | Parallel workers (default `20`). |
+| `--timeout` · `--method` · `--insecure` | Per-request timeout · HTTP method · skip TLS verify. |
+| `--output`, `--result` | Report file (default `loadtest-<timestamp>.txt`). |
+| `--no-tui` · `--yes` · `--help` | Plain output · confirm authorization · help. |
+
+---
+
 ## 🗂 Repository structure
 
 ```text
@@ -221,7 +264,11 @@ toolkit/
 │   └── logo.svg
 ├── linux/
 │   ├── install-docker.sh
-│   └── install-pingvin-share.sh
+│   ├── install-pingvin-share.sh
+│   └── loadtest/
+│       ├── loadtest.sh       # launcher (ensures Python 3, forwards args)
+│       ├── loadtest.py       # the tester (TUI + engine)
+│       └── README.md
 ├── proxmox/
 │   └── proxmox-wipe.sh
 ├── README.md        # English (this file)

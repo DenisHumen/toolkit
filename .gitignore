@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+# Proxy lists contain credentials — never commit them.
+proxy.txt
+proxies.txt
+*proxies.txt
+*.proxy.txt
+
+# loadtest result reports
+loadtest-*.txt
