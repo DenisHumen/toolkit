@@ -36,6 +36,7 @@ script gets its own block** with a short description and the commands to run it.
 | [`install-docker.sh`](#install-dockersh) | Linux | Auto-detects the distro and installs Docker Engine + Compose v2 from Docker's official repos. |
 | [`install-pingvin-share.sh`](#install-pingvin-sharesh) | Linux | Deploys Pingvin Share via Docker behind a Caddy reverse proxy with automatic HTTPS, and opens the firewall. |
 | [`loadtest`](#loadtest) | Linux | Authorized load / WAF / rate-limit tester — measures how well **your own** site blocks traffic, optionally through a rotating proxy pool. |
+| [`netwatch`](#netwatch) | Linux | Continuously measures a connection — ICMP, DNS, HTTP, throughput, multi-WAN failover — into SQLite, then writes a Markdown report with charts and a verdict naming the layer at fault. |
 
 > 📌 This table grows as new scripts are added.
 
@@ -256,6 +257,63 @@ chmod +x linux/loadtest/loadtest.sh
 
 ---
 
+---
+
+### `netwatch`
+
+> 📡 Continuous internet quality monitor (Python 3, stdlib only, launched from a `.sh`). Probes the connection once a second for as long as you like, stores every sample in **SQLite**, then writes a **Markdown report with SVG charts** and a verdict that says *where* the problem is.
+
+**Location:** [`linux/netwatch/`](linux/netwatch/) &nbsp;·&nbsp; full docs: [`linux/netwatch/README.md`](linux/netwatch/README.md)
+
+Built for the fault that is hard to catch by hand — *"it drops for a couple of seconds and I don't
+know why"*. It pings your **gateway → second router → the ISP's first hop → three public anchors**
+once a second (recording every reply's **TTL**), checks **DNS** on several resolvers over UDP/TCP/DoH,
+runs **phase-timed HTTPS** requests (DNS/TCP/TLS/TTFB), measures **throughput and the latency under
+load** (a real bufferbloat grade), and samples **traceroute, path MTU, TCP ports, NTP** and the
+**local interface** (errors, drops, carrier, Wi-Fi signal). Nothing is kept in RAM — a single writer
+thread streams everything into the database.
+
+For a **dual-ISP load balancer** it re-checks the public IP every couple of seconds with one UDP DNS
+packet, confirms each change against a second oracle, labels every address with its **ASN/operator**,
+and reports **loss, latency, jitter and MOS separately per uplink** plus every switch and what it
+cost. Reply TTL is a second, higher-resolution witness that catches switches shorter than the polling
+interval.
+
+No external binaries are required: where `ping` and `traceroute` are missing (minimal containers),
+netwatch does ICMP echo, traceroute and path-MTU discovery itself over a socket.
+
+#### ▶️ Run
+
+```bash
+chmod +x linux/netwatch/netwatch.sh
+# interactive TUI menu + live dashboard:
+./linux/netwatch/netwatch.sh
+# 90-second diagnostic, or an unattended capture:
+./linux/netwatch/netwatch.sh --quick
+./linux/netwatch/netwatch.sh --duration 8h --plan 100 --yes --no-tui
+# rebuild the report from a capture you already have:
+./linux/netwatch/netwatch.sh --analyze ./netwatch-20260821-120000
+```
+
+| Flag | Description |
+|---|---|
+| `--duration`, `--time` | How long to monitor: `90s`, `30m`, `2h`, `1d` (`0` = until you press `q`). |
+| `--interval` · `--wan-interval` | ICMP probe interval (default `1.0` s) · public-IP/failover probe interval (default `2.0` s). |
+| `--dns-interval` · `--http-interval` · `--link-interval` | Probe intervals for DNS, HTTP and the local interface. |
+| `--speed-interval` · `--speed-max-mb` | Seconds between speed tests (`0` = off) · data cap per test. |
+| `--trace-interval` · `--plan` | Seconds between traceroutes (`0` = off) · your subscribed speed in Mbps. |
+| `--targets` · `--urls` · `--resolvers` | Extra ping targets (`name=host`), HTTP endpoints and DNS servers. |
+| `--no-speed` · `--no-trace` · `--no-ipv6` · `--no-mtu` | Disable individual probes (metered or restricted links). |
+| `--out` · `--db` · `--label` | Output directory · explicit SQLite file · name shown in the report. |
+| `--analyze <path>` · `--runs <path>` | Rebuild a report from a capture · list the runs in a database. |
+| `--quick` · `--no-tui` · `--yes` · `--help` | 90-second diagnostic · plain output · skip confirmation · full help. |
+
+> 💡 Output is one directory per capture: `report.md`, `summary.json`, `netwatch.db` and `charts/`.
+> ICMP works without root on most distros; otherwise netwatch falls back to `ping` and then to TCP
+> probes and says so in the report.
+
+---
+
 ## 🗂 Repository structure
 
 ```text
@@ -265,9 +323,13 @@ toolkit/
 ├── linux/
 │   ├── install-docker.sh
 │   ├── install-pingvin-share.sh
-│   └── loadtest/
-│       ├── loadtest.sh       # launcher (ensures Python 3, forwards args)
-│       ├── loadtest.py       # the tester (TUI + engine)
+│   ├── loadtest/
+│   │   ├── loadtest.sh       # launcher (ensures Python 3, forwards args)
+│   │   ├── loadtest.py       # the tester (TUI + engine)
+│   │   └── README.md
+│   └── netwatch/
+│       ├── netwatch.sh       # launcher (ensures Python 3, forwards args)
+│       ├── netwatch.py       # monitor + analysis + report generator
 │       └── README.md
 ├── proxmox/
 │   └── proxmox-wipe.sh

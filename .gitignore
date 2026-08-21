@@ -9,3 +9,6 @@ proxies.txt
 
 # loadtest result reports
 loadtest-*.txt
+
+# netwatch captures (SQLite dumps + generated reports)
+netwatch-*/
