@@ -249,6 +249,9 @@ def clip(s, width):
     return "".join(out) + C0
 
 
+CURSOR_KEYS = {b"A": "up", b"B": "down", b"C": "right", b"D": "left"}
+
+
 class KeyReader:
     """Non-blocking single-key reader: POSIX termios / Windows msvcrt."""
 
@@ -256,8 +259,10 @@ class KeyReader:
         self.enabled = False
         self._fd = None
         self._old = None
+        self._buf = b""
 
     def __enter__(self):
+        self._buf = b""
         if not sys.stdin.isatty():
             return self
         if os.name == "nt":
@@ -311,30 +316,92 @@ class KeyReader:
                     return ch
                 time.sleep(0.02)
             return None
+        key = self._pop()
+        if key is not None:
+            return key
+        self._buf += self._read(timeout)
+        key = self._pop()
+        if key is not None:
+            return key
+        if self._buf:
+            # Only part of an escape sequence arrived; give the rest a moment
+            # before concluding that the user pressed a bare Escape.
+            self._buf += self._read(0.05)
+            return self._pop(final=True)
+        return None
+
+    def _read(self, timeout):
+        """Read straight from the descriptor.
+
+        sys.stdin is a buffered text stream: one read(1) can pull a whole escape
+        sequence into Python's buffer while select() still reports the descriptor
+        as empty, so the rest of the sequence becomes invisible. Reading the fd
+        directly keeps select() and the bytes in agreement.
+        """
         try:
-            r, _, _ = select.select([sys.stdin], [], [], timeout)
+            ready, _, _ = select.select([self._fd], [], [], timeout)
         except Exception:
-            return None
-        if not r:
-            return None
-        ch = sys.stdin.read(1)
-        if ch == "\x03":
-            raise KeyboardInterrupt
-        if ch in ("\r", "\n"):
-            return "enter"
-        if ch == "\x1b":
-            r, _, _ = select.select([sys.stdin], [], [], 0.05)
-            if not r:
+            return b""
+        if not ready:
+            return b""
+        try:
+            return os.read(self._fd, 64)
+        except (OSError, InterruptedError, ValueError):
+            return b""
+
+    def _pop(self, final=False):
+        """Take one keypress off the pending bytes, or None if none is complete.
+
+        Held-down keys and fast typing deliver several sequences in a single read,
+        so whatever is left over stays buffered for the next call instead of being
+        dropped. `final` means no more bytes are coming: a lone ESC really is the
+        Escape key by then.
+        """
+        while self._buf:
+            buf = self._buf
+            if buf[:1] != b"\x1b":
+                ch, self._buf = buf[:1], buf[1:]
+                if ch == b"\x03":
+                    raise KeyboardInterrupt
+                if ch in (b"\r", b"\n"):
+                    return "enter"
+                decoded = ch.decode("utf-8", "ignore")
+                if decoded:
+                    return decoded
+                continue                      # part of a multi-byte character
+            if len(buf) == 1:
+                if not final:
+                    return None
+                self._buf = b""
                 return "esc"
-            seq = sys.stdin.read(1)
-            if seq != "[":
+            if buf[1:2] == b"O":              # SS3: ESC O A, application cursor mode
+                if len(buf) < 3:
+                    if not final:
+                        return None
+                    self._buf = b""
+                    return "esc"
+                key, self._buf = CURSOR_KEYS.get(buf[2:3]), buf[3:]
+                if key:
+                    return key
+                continue
+            if buf[1:2] != b"[":
+                self._buf = buf[1:]           # ESC + a plain key = Escape
                 return "esc"
-            r, _, _ = select.select([sys.stdin], [], [], 0.05)
-            if not r:
+            # CSI: parameter bytes, then intermediates, then one final byte.
+            i = 2
+            while i < len(buf) and 0x30 <= buf[i] <= 0x3F:
+                i += 1
+            while i < len(buf) and 0x20 <= buf[i] <= 0x2F:
+                i += 1
+            if i >= len(buf):
+                if not final:
+                    return None
+                self._buf = b""
                 return "esc"
-            code = sys.stdin.read(1)
-            return {"A": "up", "B": "down", "C": "right", "D": "left"}.get(code)
-        return ch
+            key, self._buf = CURSOR_KEYS.get(buf[i:i + 1]), buf[i + 1:]
+            if key:
+                return key
+        return None
 
 
 class Screen:
