@@ -21,6 +21,8 @@ def main():
                                                       "DIAGNOSTICS")))
         s.check("the footer lists the keys",
                 "quit" in first_screen and "docs" in first_screen)
+        s.check("a wide window shows every hint",
+                "u updates" in first_screen and "q quit" in first_screen)
 
         first = t.selection()
         s.check("a row is highlighted", first is not None)
@@ -100,6 +102,17 @@ def main():
         t.send("q")
         s.check("q quits", t.wait(15))
         s.check("and exits cleanly", t.exit_code == 0, f"exit={t.exit_code}")
+
+    # A narrow window drops the hints in the middle rather than cutting the line
+    # in half — what used to fall off the end was `? help` and `q quit`.
+    with Term(["bash", "toolkit.sh"], cwd=REPO, cols=80, rows=30) as t:
+        s.check("a narrow launcher still starts", t.expect("system check", 25))
+        narrow = t.screen()
+        s.check("the essential hints survive a narrow window",
+                "? help" in narrow and "q quit" in narrow, narrow[-300:])
+        s.check("and the optional ones step aside", "u updates" not in narrow)
+        t.send("q")
+        s.check("it quits from there too", t.wait(15))
     return s.finish()
 
 

@@ -1219,11 +1219,25 @@ INVOKE_CWD = os.getcwd()
 SCREEN = Screen()
 
 
-def footer(pairs):
-    out = []
-    for key, label in pairs:
-        out.append(f"{WHITE}{key}{C0} {GREY}{label}{C0}")
-    return "  " + f"{FAINT}·{C0} ".join(x + " " for x in out)
+def footer(pairs, keep_first=2, keep_last=2):
+    """Key hints, fitted to the terminal.
+
+    A narrow window used to cut the line mid-word, and what fell off the end was
+    `? help` and `q quit` — the two a lost user needs most. Now the hints in the
+    middle are dropped one at a time until the rest fits.
+    """
+    width, _rows = term_size()
+    items = list(pairs)
+
+    def render(entries):
+        return "  " + f"{FAINT}·{C0} ".join(
+            f"{WHITE}{key}{C0} {GREY}{label}{C0} " for key, label in entries)
+
+    while True:
+        line = render(items)
+        if vlen(line) <= width - 1 or len(items) <= keep_first + keep_last:
+            return clip(line, width - 1)
+        del items[len(items) - keep_last - 1]
 
 
 def render_browser(scripts, system, cursor, scroll, flt, updater=None):
