@@ -102,9 +102,9 @@ SEL = _c("\033[48;5;24m")
 BOX = ({"tl": "╭", "tr": "╮", "bl": "╰", "br": "╯", "h": "─", "v": "│"} if UNI
        else {"tl": "+", "tr": "+", "bl": "+", "br": "+", "h": "-", "v": "|"})
 GLYPH = ({"ok": "✔", "warn": "▲", "bad": "✖", "note": "●", "dot": "▪",
-          "arrow": "▸", "run": "▶", "up": "⬆"} if UNI
+          "arrow": "▸", "run": "▶", "up": "⬆", "key": "🔑", "lock": "🔒"} if UNI
          else {"ok": "+", "warn": "!", "bad": "x", "note": "*", "dot": "-",
-               "arrow": ">", "run": ">", "up": "^"})
+               "arrow": ">", "run": ">", "up": "^", "key": "*", "lock": "#"})
 STATUS_COLOR = {"ok": GREEN, "warn": YELLOW, "bad": RED, "note": BLUE, "dot": GREY}
 
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
@@ -181,6 +181,23 @@ def panel(title, lines, width, height=None, accent=GREY):
         out.append(f"{accent}{BOX['v']}{C0} {fit(ln, inner)} {accent}{BOX['v']}{C0}")
     out.append(f"{accent}{BOX['bl']}{BOX['h'] * (width - 2)}{BOX['br']}{C0}")
     return out
+
+
+def clamp_body(lines, rows=None):
+    """Keep a panel short enough that its footer still fits on screen.
+
+    paint() draws only as many lines as the window has, so a body that grows
+    past it takes the footer with it — and the footer is where it says how to
+    get out. Long content is cut with a note instead.
+    """
+    _cols, height = term_size()
+    budget = (rows if rows is not None else height) - 4
+    if budget < 4 or len(lines) <= budget:
+        return lines
+    hidden = len(lines) - budget + 1
+    return lines[:budget - 1] + [
+        f"{FAINT}… {hidden} more line{'s' if hidden != 1 else ''} — widen or "
+        f"enlarge the window to see them{C0}"]
 
 
 def side_by_side(left, right, gap=0):
@@ -422,7 +439,7 @@ class System:
         self.arch = ""
         self.pkg = ""
         self.is_root = False
-        self.can_sudo = False
+        self.sudo = "none"        # none | root | nopasswd | password | denied
         self.systemd = False
         self.container = ""
         self.cpus = 0
@@ -470,8 +487,7 @@ class System:
                 self.pkg = "apt" if manager == "apt-get" else manager
                 break
         self.systemd = os.path.isdir("/run/systemd/system")
-        if not self.is_root and shutil.which("sudo"):
-            self.can_sudo = _sh("sudo -n true", timeout=4)[0] == 0 or True
+        self._probe_sudo()
         if os.path.exists("/.dockerenv"):
             self.container = "docker"
         else:
@@ -500,6 +516,52 @@ class System:
         except OSError:
             pass
 
+    def _probe_sudo(self):
+        """Can this session actually become root, and at what cost?
+
+        `sudo -n` never prompts, so asking is safe. The distinction matters: a
+        script that needs root will simply work where sudo is passwordless, will
+        stop to ask where it is not, and will fail outright where this account
+        may not use sudo at all — and only the last of those is worth blocking.
+        """
+        if self.is_root:
+            self.sudo = "root"
+            return
+        if not shutil.which("sudo"):
+            self.sudo = "none"
+            return
+        rc, out = _run(["sudo", "-n", "true"], timeout=6)
+        if rc == 0:
+            self.sudo = "nopasswd"
+            return
+        low = out.lower()
+        if "not in the sudoers" in low or "may not run" in low:
+            self.sudo = "denied"
+            return
+        if "password" in low or self.in_admin_group():
+            self.sudo = "password"
+            return
+        # sudo said something we do not recognise; assume it would work rather
+        # than hide a script the user can in fact run.
+        self.sudo = "password"
+
+    def in_admin_group(self):
+        rc, out = _run(["id", "-nG"], timeout=4)
+        groups = set(out.split()) if rc == 0 else set()
+        return bool(groups & {"sudo", "wheel", "admin", "root", "adm"})
+
+    @property
+    def can_sudo(self):
+        return self.sudo in ("root", "nopasswd", "password")
+
+    @property
+    def sudo_note(self):
+        return {"root": "running as root",
+                "nopasswd": "sudo works without a password",
+                "password": "sudo will ask for your password",
+                "denied": "this account may not use sudo",
+                "none": "sudo is not installed"}[self.sudo]
+
     def check_internet(self):
         for host, port in (("1.1.1.1", 443), ("8.8.8.8", 53)):
             try:
@@ -525,12 +587,13 @@ class System:
         if self.pkg:
             bits.append(self.pkg)
         bits.append(f"systemd {GREEN + GLYPH['ok'] if self.systemd else GREY + '—'}{C0}")
-        if self.is_root:
-            bits.append(f"{GREEN}root{C0}")
-        elif self.can_sudo:
-            bits.append(f"{GREEN}sudo{C0}")
-        else:
-            bits.append(f"{RED}no root{C0}")
+        bits.append({
+            "root": f"{GREEN}root{C0}",
+            "nopasswd": f"{GREEN}sudo{C0}",
+            "password": f"{YELLOW}sudo {GLYPH['key']}{C0}",
+            "denied": f"{RED}no root {GLYPH['bad']}{C0}",
+            "none": f"{RED}no root {GLYPH['bad']}{C0}",
+        }[self.sudo])
         if self.internet is True:
             bits.append(f"net {GREEN}{GLYPH['ok']}{C0}")
         elif self.internet is False:
@@ -548,8 +611,9 @@ class System:
             ("Package manager", self.pkg or "none detected"),
             ("Init system", "systemd" if self.systemd
              else "not systemd (or not booted with it)"),
-            ("Privileges", "running as root" if self.is_root
-             else ("sudo available" if self.can_sudo else "unprivileged, no sudo")),
+            ("Privileges", self.sudo_note
+             + ("" if self.sudo in ("root", "nopasswd")
+                else "  —  scripts needing root are marked in the list")),
             ("Environment", self.container or "bare metal / VM"),
             ("CPU / memory", f"{self.cpus} cores"
              + (f", {self.mem_gb:.1f} GiB RAM" if self.mem_gb else "")),
@@ -865,6 +929,8 @@ class Script:
         self.checks = []
         self.verdict = "unknown"
         self.present = ""
+        self.tag = ""            # the one-word reason shown beside it in the list
+        self.remedy = []         # what to do about it; "$ cmd" renders as a command
 
     # -- parsing --------------------------------------------------------- #
     def _parse(self):
@@ -1120,11 +1186,30 @@ def port_in_use(port):
         return False
 
 
+def package_hint(system, commands):
+    """The command that would install these on this machine, if we know it."""
+    manager = {"apt": "apt install", "dnf": "dnf install", "yum": "yum install",
+               "pacman": "pacman -S", "zypper": "zypper install",
+               "apk": "apk add"}.get(system.pkg)
+    if not manager:
+        return None
+    prefix = "" if system.is_root else "sudo "
+    return f"$ {prefix}{manager} {' '.join(commands)}"
+
+
 def evaluate(script, system, deep=True):
     """Fill script.checks / script.verdict with the result of the system check."""
     checks = []
     blockers = 0
     warnings = 0
+    script.tag = ""
+    script.remedy = []
+    root_hint = ""          # the weakest tag: true, but rarely the point
+
+    def tag(text):
+        """First one wins: blockers are set before warnings."""
+        if not script.tag:
+            script.tag = text
 
     families = [f.lower() for f in script.list_of("os")]
     if families and "any" not in families:
@@ -1138,29 +1223,52 @@ def evaluate(script, system, deep=True):
             checks.append(("bad", f"targets {', '.join(families)} — this is "
                                   f"{system.family}"))
             blockers += 1
+            tag(f"not {families[0]}")
+            script.remedy = [f"This script only knows how to work on "
+                             f"{', '.join(families)}. Run it on one of those, or "
+                             f"open it and adapt the package-manager section."]
     else:
         checks.append(("ok", "runs on any Linux system"))
 
     root = script.needs_root
     if root == "yes":
-        if system.is_root:
+        if system.sudo == "root":
             checks.append(("ok", "running as root"))
-        elif system.can_sudo:
-            checks.append(("ok", "needs root — will be run through sudo"))
+        elif system.sudo == "nopasswd":
+            checks.append(("ok", "needs root — sudo will elevate it, no password"))
+            root_hint = "root"
+        elif system.sudo == "password":
+            checks.append(("note", "needs root — sudo will ask for your password "
+                                   "when it starts"))
+            root_hint = "root"
         else:
-            checks.append(("bad", "needs root, and sudo is not available here"))
+            checks.append(("bad", "this script must run as root, and this session "
+                                  f"cannot become root: {system.sudo_note}"))
             blockers += 1
+            tag("needs root")
+            script.remedy = ["Start the launcher as root and it will appear ready:",
+                             "$ sudo ./toolkit.sh"] if system.sudo == "password" else [
+                "Log in as root (or as a user allowed to use sudo) and start it again:",
+                "$ su -", "$ ./toolkit.sh",
+                "Running the script directly will fail for the same reason."]
     elif root == "optional":
-        checks.append(("ok" if system.root_ok else "warn",
-                       "root not required, but some checks need it"
-                       if not system.root_ok else "root available for the parts that need it"))
-        warnings += 0 if system.root_ok else 1
+        if system.root_ok:
+            checks.append(("ok", "root available for the parts that need it"))
+        else:
+            checks.append(("warn", "runs without root, but the parts that need it "
+                                   "will be skipped or reduced"))
+            warnings += 1
+            tag("limited")
 
     missing = [c for c in script.list_of("needs") if not shutil.which(c)]
     present = [c for c in script.list_of("needs") if shutil.which(c)]
     if missing:
         checks.append(("bad", f"missing required command(s): {', '.join(missing)}"))
         blockers += 1
+        tag(f"no {missing[0]}")
+        hint = package_hint(system, missing)
+        script.remedy = ["Install what it needs, then press r to re-check:"] + (
+            [hint] if hint else [f"install: {', '.join(missing)}"])
     elif present:
         checks.append(("ok", f"required commands present: {', '.join(present)}"))
     soft_missing = [c for c in script.list_of("optional") if not shutil.which(c)]
@@ -1181,11 +1289,17 @@ def evaluate(script, system, deep=True):
         if port.isdigit() and port_in_use(port):
             checks.append(("warn", f"port {port} is already in use by something else"))
             warnings += 1
+            tag(f"port {port} busy")
 
     if script.kind == "installer":
         if system.internet is False:
             checks.append(("bad", "no internet connection — packages cannot be downloaded"))
             blockers += 1
+            tag("offline")
+            script.remedy = ["Connect this machine to the internet, then press r in "
+                             "the launcher to check again.",
+                             "The netwatch entry can tell you what is wrong with the "
+                             "connection."]
         elif system.internet:
             checks.append(("ok", "internet reachable for downloads"))
 
@@ -1198,10 +1312,37 @@ def evaluate(script, system, deep=True):
     if missing_required:
         checks.append(("warn", f"set {', '.join(missing_required)} in Options before running"))
         warnings += 1
+        tag(f"needs {missing_required[0]}")
 
     script.checks = checks
     script.verdict = "blocked" if blockers else ("attention" if warnings else "ready")
+    # Whatever stops the script comes first; "installed" and "root" are only
+    # worth the space when nothing more urgent needs it.
+    if not script.tag:
+        script.tag = "installed" if script.present else root_hint
     return script.verdict
+
+
+def tag_colour(script):
+    if script.verdict == "blocked":
+        return RED
+    if script.tag == "installed":
+        return BLUE
+    if script.verdict == "attention":
+        return YELLOW
+    return FAINT
+
+
+def remedy_lines(script, width, indent="  "):
+    """Render the 'what to do' steps; a leading $ marks a command to type."""
+    out = []
+    for step in script.remedy:
+        if step.startswith("$ "):
+            out.append(f"{indent}{CYAN}{clip(step[2:], width - len(indent))}{C0}")
+        else:
+            for chunk in wrap(step, width, indent):
+                out.append(f"{GREY}{chunk}{C0}")
+    return out
 
 
 def verdict_glyph(script):
@@ -1284,12 +1425,19 @@ def render_browser(scripts, system, cursor, scroll, flt, updater=None):
         s = scripts[payload]
         state, glyph = verdict_glyph(s)
         colour = STATUS_COLOR[state]
-        label = s.name
+        # The tag answers "why not?" without opening anything: needs root, no
+        # curl, wrong distro, already installed.
+        tag = s.tag
+        gap = 2
+        room = max(10, left_w - 11 - (len(tag) + gap if tag else 0))
+        name = pad(ellipsis(s.name, room), room)
+        spacer = " " * gap if tag else ""
         if payload == cursor:
             left.append(f"{SEL}{WHITE} {GLYPH['arrow']} {colour}{glyph}{WHITE} "
-                        f"{fit(label, left_w - 11)}{C0}")
+                        f"{name}{spacer}{tag_colour(s)}{tag}{C0}")
         else:
-            left.append(f"   {colour}{glyph}{C0} {GREY}{clip(label, left_w - 11)}{C0}")
+            left.append(f"   {colour}{glyph}{C0} {GREY}{name}{C0}{spacer}"
+                        f"{tag_colour(s)}{tag}{C0}")
     if not left:
         left = [f"{GREY}nothing matches the filter{C0}"]
 
@@ -1299,7 +1447,8 @@ def render_browser(scripts, system, cursor, scroll, flt, updater=None):
         inner = right_w - 4
         right.append(f"{KIND_COLOR.get(s.kind, GREY)}{KIND_LABEL.get(s.kind, s.kind)}{C0}"
                      f" {GREY}·{C0} {s.category}"
-                     + (f"  {GREY}·{C0} {MAGENTA}{s.present}{C0}" if s.present else ""))
+                     + (f" {GREY}·{C0} {MAGENTA}{ellipsis(s.present, 30)}{C0}"
+                        if s.present else ""))
         right.append(f"{FAINT}{s.rel}{C0}")
         right.append("")
         for line in wrap(s.summary, inner):
@@ -1320,7 +1469,7 @@ def render_browser(scripts, system, cursor, scroll, flt, updater=None):
         verdicts = {
             "ready": f"{GREEN}{GLYPH['ok']} ready to run{C0}",
             "attention": f"{YELLOW}{GLYPH['warn']} runnable — read the notes above{C0}",
-            "blocked": f"{RED}{GLYPH['bad']} cannot run on this machine{C0}",
+            "blocked": f"{RED}{GLYPH['bad']} will not run on this machine{C0}",
         }
         right.append(verdicts.get(s.verdict, ""))
         extras = []
@@ -1335,6 +1484,11 @@ def render_browser(scripts, system, cursor, scroll, flt, updater=None):
         for line in extras:
             for chunk in wrap(line, inner):
                 right.append(f"{FAINT}{chunk}{C0}")
+        # Last, because it is the thing to act on.
+        if s.verdict == "blocked" and s.remedy:
+            right.append("")
+            right.append(f"{RED}{BOLD}How to fix it{C0}")
+            right.extend(remedy_lines(s, inner - 2))
     else:
         right = [f"{GREY}No scripts found under {REPO}{C0}"]
 
@@ -1391,7 +1545,13 @@ def confirm_screen(script, system, preview=False, extra=""):
         lines.append(f"{CYAN}{line}{C0}")
     facts = []
     if script.needs_root == "yes":
-        facts.append("runs as root" + ("" if system.is_root else " (via sudo — it will ask)"))
+        facts.append({
+            "root": "runs as root — this launcher already is root",
+            "nopasswd": "runs as root through sudo, without a password",
+            "password": "runs as root through sudo — it will ask for your password",
+            "denied": "must run as root, and this account may not use sudo",
+            "none": "must run as root, and sudo is not installed here",
+        }[system.sudo])
     if preview:
         facts.append("dry run: prints every step and changes nothing")
     if script.get("writes"):
@@ -1418,7 +1578,20 @@ def confirm_screen(script, system, preview=False, extra=""):
             lines.append(f"    {GREY}{chunk}{C0}")
     lines.append("")
     if script.verdict == "blocked":
-        lines.append(f"{RED}{GLYPH['bad']} This machine does not meet the requirements.{C0}")
+        lines.append(f"{RED}{BOLD}{GLYPH['bad']} This will not run on this machine.{C0}")
+        lines.append("")
+        reasons = [text for state, text in script.checks if state == "bad"]
+        for i, reason in enumerate(reasons):
+            chunks = wrap(reason, inner - 12)
+            head = f"  {RED}Why {C0}" if i == 0 else "      "
+            lines.append(f"{head} {chunks[0] if chunks else ''}")
+            for chunk in chunks[1:]:
+                lines.append(f"       {GREY}{chunk}{C0}")
+        if script.remedy:
+            lines.append("")
+            for i, entry in enumerate(remedy_lines(script, inner - 12, "")):
+                head = f"  {GREEN}Fix {C0}" if i == 0 else "      "
+                lines.append(f"{head} {entry}")
     elif script.kind == "destructive":
         lines.append(f"{RED}{BOLD}{GLYPH['warn']} DESTRUCTIVE — type the confirmation to continue.{C0}")
     elif script.verdict == "attention":
@@ -1428,11 +1601,13 @@ def confirm_screen(script, system, preview=False, extra=""):
     lines.append("")
 
     accent = {"ready": GREEN, "attention": YELLOW, "blocked": RED}.get(script.verdict, GREY)
-    frame = panel(f"{BOLD}{action}: {script.name}{C0}", lines, w, accent=accent)
+    frame = panel(f"{BOLD}{action}: {script.name}{C0}", clamp_body(lines), w,
+                  accent=accent)
     keys = [("⏎", "start"), ("p", "toggle dry run"), ("o", "options"),
             ("d", "docs"), ("Esc", "back")]
     if script.verdict == "blocked":
-        keys = [("f", "run anyway"), ("o", "options"), ("d", "docs"), ("Esc", "back")]
+        keys = [("Esc", "back"), ("d", "docs"), ("o", "options"),
+                ("f", "try anyway")]
     frame.append(footer(keys))
     return frame
 
@@ -1458,7 +1633,7 @@ def options_screen(script, extra):
                 line = f"{SEL}{line}{C0}"
             body.append(line)
             body.append(f"     {FAINT}{label}{C0}")
-        frame = panel(f"Options — {script.name}", body, w, accent=CYAN)
+        frame = panel(f"Options — {script.name}", clamp_body(body), w, accent=CYAN)
         frame.append(footer([("↑↓", "move"), ("⏎", "edit"), ("Esc", "back")]))
         SCREEN.paint(frame)
         key = KEYS.get(0.4)
@@ -1808,7 +1983,7 @@ def update_screen(updater):
                          f"{updater.local_sha[:7]}...{updater.branch}{C0}")
 
         lines.append("")
-        frame = panel(f"{BOLD}{title}{C0}", lines, w, accent=accent)
+        frame = panel(f"{BOLD}{title}{C0}", clamp_body(lines), w, accent=accent)
         frame.append(footer(keys))
         SCREEN.paint(frame)
 
@@ -1951,8 +2126,10 @@ def print_list(scripts, system, updater=None):
             last = s.category
         state, glyph = verdict_glyph(s)
         colour = STATUS_COLOR[state]
+        # The same reason tag the browser shows, so a piped list says as much.
+        tag = f"   {tag_colour(s)}{s.tag}{C0}" if s.tag else ""
         print(f"   {colour}{glyph}{C0} {WHITE}{fit(ellipsis(s.name, 34), 34)}{C0} "
-              f"{KIND_COLOR.get(s.kind, GREY)}{s.kind:<12}{C0}{GREY}{s.rel}{C0}")
+              f"{KIND_COLOR.get(s.kind, GREY)}{s.kind:<12}{C0}{GREY}{s.rel}{C0}{tag}")
         print(f"     {GREY}{ellipsis(s.summary, 94)}{C0}")
     print()
     notice = updater.summary_line() if updater else ""

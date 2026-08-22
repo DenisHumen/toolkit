@@ -113,6 +113,23 @@ def main():
         s.check("and the optional ones step aside", "u updates" not in narrow)
         t.send("q")
         s.check("it quits from there too", t.wait(15))
+
+    # A short window must not swallow the footer either: paint() draws only as
+    # many lines as the window has, and the footer is where it says how to leave.
+    with Term(["bash", "toolkit.sh"], cwd=REPO, cols=100, rows=14) as t:
+        # In 14 rows the detail pane is too short to reach "system check";
+        # the list panel is what must always be there.
+        s.check("a short launcher still starts", t.expect("scripts", 25))
+        t.mark()
+        t.send("enter")
+        short = t.screen(1.5)
+        s.check("a summary in a short window keeps its footer",
+                "Esc" in short, short[-400:])
+        s.check("and says the body was cut rather than hiding it",
+                "more line" in short or "System check" in short, short[-400:])
+        t.send("esc")
+        t.send("q")
+        s.check("and it still quits", t.wait(15))
     return s.finish()
 
 

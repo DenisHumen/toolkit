@@ -11,9 +11,10 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lib import REPO, Suite, Term                                  # noqa: E402
+from lib import REPO, Suite, Term, have                            # noqa: E402
 
 LAUNCHER = os.path.join(REPO, "toolkit.sh")
+FULL = os.environ.get("TOOLKIT_TEST_FULL") == "1"
 
 
 def run(args, timeout=120):
@@ -88,6 +89,40 @@ def main():
 
         t.send("q")
         s.check("quits cleanly", t.wait(15) and t.exit_code == 0)
+
+    # ---- a session that cannot become root -------------------------------- #
+    # The real thing, not a mock: an ordinary user on a machine with no sudo.
+    if not FULL:
+        s.skip("the no-root view", "set TOOLKIT_TEST_FULL=1")
+    elif not have("docker"):
+        s.skip("the no-root view", "docker not available")
+    else:
+        script = (
+            "apt-get -qq update >/dev/null 2>&1\n"
+            "DEBIAN_FRONTEND=noninteractive apt-get -qq install -y python3"
+            " >/dev/null 2>&1\n"
+            "command -v sudo >/dev/null && apt-get -qq remove -y sudo >/dev/null 2>&1\n"
+            "useradd -m plain\n"
+            "cp -r /repo /work && chown -R plain /work\n"
+            "su plain -c 'cd /work && bash toolkit.sh --list'\n"
+            "echo LIST_RC=$?\n"
+            "su plain -c 'cd /work && bash toolkit.sh --check'\n"
+            "echo CHECK_RC=$?\n")
+        p = subprocess.run(["docker", "run", "--rm", "-v", f"{REPO}:/repo:ro",
+                            "debian:12", "bash", "-c", script],
+                           capture_output=True, text=True, errors="replace",
+                           timeout=600)
+        out = p.stdout + p.stderr
+        s.check("the launcher runs fine without any root", "LIST_RC=0" in out,
+                out[-400:])
+        s.check("and the checks still complete", "CHECK_RC=0" in out)
+        s.check("the header says there is no root", "no root" in out, out[:400])
+        s.check("root-only scripts are marked as blocked",
+                "✖" in out and "needs root" in out, out[-600:])
+        s.check("with the reason spelled out", "must run as root" in out,
+                out[-600:])
+        s.check("tools that need no root are still offered",
+                "loadtest" in out and "netwatch" in out)
 
     # ---- preview mode ---------------------------------------------------- #
     with Term(["bash", LAUNCHER], cwd="/tmp") as t:

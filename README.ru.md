@@ -54,6 +54,49 @@ chmod +x toolkit.sh
 | ✖ | заблокирован — не тот дистрибутив, нет root, нет нужной команды |
 | ● | уже установлено / уже присутствует здесь |
 
+У каждого пункта есть короткий тег с ответом **почему** он не «готов» — `needs root`, `no curl`,
+`needs --domain`, `not debian`, `installed`, — так что список отвечает на вопрос, не открываясь.
+
+#### Запуск без root
+
+В шапке написано, что эта сессия реально может: `root`, `sudo` (пароль не нужен), `sudo 🔑`
+(спросит пароль) или `no root ✖`. Если получить root невозможно вовсе, каждый требующий его скрипт
+помечается красным и **запущен не будет**:
+
+```text
+╭─ scripts ───────────────────────────────────╮╭─ Docker Engine + Compose v2 ──────────────────╮
+│ CONTAINERS                                  ││  ✔ Ubuntu 24.04.4 LTS is a supported system   │
+│  ▸ ✖ Docker Engine + Compose…  needs root   ││  ✖ this script must run as root, and this     │
+│    ✖ Pingvin Share (file sha…  needs root   ││    session cannot become root: this account   │
+│ SECURITY                                    ││    may not use sudo                           │
+│    ▲ Server hardening (audit + …  limited   ││                                               │
+│    ✔ loadtest — WAF / rate-limit tester     ││  ✖ will not run on this machine               │
+╰─────────────────────────────────────────────╯╰───────────────────────────────────────────────╯
+```
+
+Если такой пункт всё-таки открыть, проблема не прячется за неудачным запуском — она объясняется,
+и рядом написано, что делать:
+
+```text
+ ✖ This will not run on this machine.
+
+   Why  this script must run as root, and this session cannot become root:
+        this account may not use sudo
+
+   Fix  Log in as root (or as a user allowed to use sudo) and start it again:
+        su -
+        ./toolkit.sh
+        Running the script directly will fail for the same reason.
+
+   Esc back · d docs · o options · f try anyway
+```
+
+Так же разбираются и остальные препятствия: для отсутствующей команды подставляется строка
+`apt install` под этот дистрибутив, для чужого дистрибутива — список поддерживаемых, для отсутствия
+сети — указание на подключение. Скрипты, которым root лишь *желателен* (например, аудит
+безопасности), запускаются всё равно и получают тег `limited`, потому что они деградируют, а не
+падают. `f` по-прежнему запускает принудительно — на случай, когда вы знаете лучше проверки.
+
 При выборе скрипта показывается полная сводка до того, как что-либо произойдёт: **что он делает**,
 **точная команда**, которая будет выполнена, что именно он **изменит** (файлы, порты, пакеты, нужен
 ли root), и **проверка системы** построчно. Ещё одно `⏎` — и он стартует; дальше терминал принадлежит

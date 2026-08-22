@@ -81,18 +81,36 @@ echo nuke
 
 
 class FakeSystem:
-    """A machine with known properties, so verdicts are predictable."""
+    """A machine with known properties, so verdicts are predictable.
 
-    def __init__(self, family="debian", is_root=True, can_sudo=True, internet=True):
+    `sudo` mirrors the real launcher's five states: already root, sudo without a
+    password, sudo that will ask, an account that may not sudo at all, and no
+    sudo installed. Only the last two make a root-requiring script unrunnable.
+    """
+
+    def __init__(self, family="debian", sudo="root", internet=True, pkg="apt"):
         self.family = family
         self.distro = f"{family} test"
-        self.is_root = is_root
-        self.can_sudo = can_sudo
+        self.sudo = sudo
+        self.is_root = sudo == "root"
         self.internet = internet
+        self.pkg = pkg
+
+    @property
+    def can_sudo(self):
+        return self.sudo in ("root", "nopasswd", "password")
 
     @property
     def root_ok(self):
-        return self.is_root or self.can_sudo
+        return self.can_sudo
+
+    @property
+    def sudo_note(self):
+        return {"root": "running as root",
+                "nopasswd": "sudo works without a password",
+                "password": "sudo will ask for your password",
+                "denied": "this account may not use sudo",
+                "none": "sudo is not installed"}[self.sudo]
 
 
 def build_tree(root):
@@ -155,11 +173,11 @@ def main():
                 flags["--debug"].value = ""
             if "--domain" in flags:
                 flags["--domain"].value = "example.com"
-                argv = alpha.argv(FakeSystem(is_root=True), preview=False)
+                argv = alpha.argv(FakeSystem(sudo="root"), preview=False)
                 s.check("builds the command with the filled-in argument",
                         argv[:1] == ["bash"] and "--yes" in argv
                         and argv[-2:] == ["--domain", "example.com"], " ".join(argv))
-                argv_sudo = alpha.argv(FakeSystem(is_root=False, can_sudo=True))
+                argv_sudo = alpha.argv(FakeSystem(sudo="password"))
                 s.check("prefixes sudo when root is needed and available",
                         argv_sudo[0] == "sudo")
                 flags["--domain"].value = ""
@@ -195,13 +213,52 @@ def main():
             s.check("and says which systems it wants",
                     any("debian" in t for st, t in alpha.checks if st == "bad"))
 
-            tk.evaluate(alpha, FakeSystem(family="debian", is_root=False,
-                                          can_sudo=False), deep=False)
-            s.check("no root and no sudo blocks it", alpha.verdict == "blocked")
+            # ---- the five privilege states ------------------------------ #
+            # A blocked or missing argument is a more useful tag than "root",
+            # so satisfy those first to see what the privilege state alone says.
+            alpha.present = ""
+            for a in alpha.args:
+                if a.required:
+                    a.value = "example.com"
+            tk.evaluate(alpha, FakeSystem(sudo="root"), deep=False)
+            s.check("as root, a root-only script is ready",
+                    alpha.verdict in ("ready", "attention"), alpha.verdict)
+
+            tk.evaluate(alpha, FakeSystem(sudo="nopasswd"), deep=False)
+            s.check("with passwordless sudo it is ready too",
+                    alpha.verdict in ("ready", "attention"), alpha.verdict)
+            s.check("and says no password is needed",
+                    any("no password" in t for _st, t in alpha.checks))
+
+            tk.evaluate(alpha, FakeSystem(sudo="password"), deep=False)
+            s.check("when sudo will prompt, it is still runnable",
+                    alpha.verdict != "blocked", alpha.verdict)
+            s.check("but warns the password is coming",
+                    any("ask for your password" in t for _st, t in alpha.checks))
+            s.check("and is tagged as needing root", alpha.tag == "root", alpha.tag)
+
+            for state in ("denied", "none"):
+                tk.evaluate(alpha, FakeSystem(sudo=state), deep=False)
+                s.check(f"sudo '{state}' blocks a root-only script",
+                        alpha.verdict == "blocked", alpha.verdict)
+                s.check(f"sudo '{state}' is tagged in the list",
+                        alpha.tag == "needs root", alpha.tag)
+                s.check(f"sudo '{state}' explains why",
+                        any(state_ == "bad" and "must run as root" in text
+                            for state_, text in alpha.checks),
+                        str(alpha.checks))
+                s.check(f"sudo '{state}' says what to do about it",
+                        bool(alpha.remedy) and any("root" in step.lower()
+                                                   for step in alpha.remedy),
+                        str(alpha.remedy))
+                s.check(f"sudo '{state}' offers a command to run",
+                        any(step.startswith("$ ") for step in alpha.remedy),
+                        str(alpha.remedy))
 
             tk.evaluate(alpha, FakeSystem(family="debian", internet=False), deep=False)
             s.check("an installer without internet is blocked",
                     alpha.verdict == "blocked")
+            s.check("and is tagged offline", alpha.tag == "offline", alpha.tag)
 
         if nuke:
             tk.evaluate(nuke, FakeSystem(), deep=False)
@@ -209,6 +266,11 @@ def main():
             s.check("and names the command",
                     any("definitely-not-a-real-binary" in t
                         for st, t in nuke.checks if st == "bad"))
+            s.check("and tags the missing one in the list",
+                    nuke.tag.startswith("no "), nuke.tag)
+            s.check("and suggests how to install it",
+                    any("apt install" in step for step in nuke.remedy),
+                    str(nuke.remedy))
 
         # ---- the real repository still parses ---------------------------- #
         real = tk.discover(REPO)

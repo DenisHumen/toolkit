@@ -53,6 +53,49 @@ Each entry is marked with what the launcher found out about your machine:
 | ✖ | blocked — wrong distro, no root, a required command is missing |
 | ● | already installed / already present here |
 
+Every entry also carries a short tag saying **why** it is not simply ready — `needs root`,
+`no curl`, `needs --domain`, `not debian`, `installed` — so the list answers the question without
+being opened.
+
+#### Started without root
+
+The header states what this session can actually do: `root`, `sudo` (no password needed),
+`sudo 🔑` (it will ask for one), or `no root ✖`. When the session cannot become root at all, every
+script that requires it is marked red and **will not be run**:
+
+```text
+╭─ scripts ───────────────────────────────────╮╭─ Docker Engine + Compose v2 ──────────────────╮
+│ CONTAINERS                                  ││  ✔ Ubuntu 24.04.4 LTS is a supported system   │
+│  ▸ ✖ Docker Engine + Compose…  needs root   ││  ✖ this script must run as root, and this     │
+│    ✖ Pingvin Share (file sha…  needs root   ││    session cannot become root: this account   │
+│ SECURITY                                    ││    may not use sudo                           │
+│    ▲ Server hardening (audit + …  limited   ││                                               │
+│    ✔ loadtest — WAF / rate-limit tester     ││  ✖ will not run on this machine               │
+╰─────────────────────────────────────────────╯╰───────────────────────────────────────────────╯
+```
+
+Opening one does not hide the problem behind a failed run — it explains it and says what to do:
+
+```text
+ ✖ This will not run on this machine.
+
+   Why  this script must run as root, and this session cannot become root:
+        this account may not use sudo
+
+   Fix  Log in as root (or as a user allowed to use sudo) and start it again:
+        su -
+        ./toolkit.sh
+        Running the script directly will fail for the same reason.
+
+   Esc back · d docs · o options · f try anyway
+```
+
+The same treatment covers the other blockers: a missing command comes with the `apt install` line
+for this distro, the wrong distribution says which ones the script targets, and being offline points
+at the connection. Scripts that merely *prefer* root (like the security audit) run anyway and are
+tagged `limited`, because they degrade rather than fail. `f` still forces a run, for when you know
+better than the check.
+
 Selecting a script shows a full summary before anything runs: **what it does**, the **exact command**
 that will be executed, what it will **change** (files, ports, packages, whether it needs root) and
 the **system check** line by line. One more `⏎` starts it; the script then owns the terminal, so its
