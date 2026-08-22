@@ -2,6 +2,19 @@
 #
 # install-docker.sh — universal Docker Engine + Docker Compose installer.
 #
+# toolkit-name: Docker Engine + Compose v2
+# toolkit-kind: installer
+# toolkit-category: Containers
+# toolkit-summary: Installs Docker Engine, the CLI, containerd, Buildx and Compose v2 from Docker's own repositories.
+# toolkit-os: debian, fedora
+# toolkit-root: yes
+# toolkit-optional: curl, systemctl, gpg
+# toolkit-detect: docker --version
+# toolkit-preview: --dry-run
+# toolkit-run: --yes
+# toolkit-writes: /etc/apt/sources.list.d/docker.list (or /etc/yum.repos.d/docker-ce.repo)
+# toolkit-order: 10
+#
 # One script that detects the host distribution and runs the matching official
 # install path:
 #   * Ubuntu / Debian (and derivatives) -> Docker's apt repository
@@ -45,7 +58,7 @@ while [ $# -gt 0 ]; do
         -y|--yes)     ASSUME_YES=1 ;;
         --no-start)   DO_START=0 ;;
         --no-group)   ADD_GROUP=0 ;;
-        -h|--help)    grep '^#' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
+        -h|--help)    grep '^#' "$0" | grep -v '^#!' | grep -v '^# toolkit-' | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
     shift

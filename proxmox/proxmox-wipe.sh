@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 #
 # proxmox-wipe.sh — destroy all guests and ZERO every NON-system disk on this host,
+#
+# toolkit-name: Proxmox — wipe host
+# toolkit-kind: destructive
+# toolkit-category: Proxmox
+# toolkit-summary: Destroys every VM/CT and zeroes all non-system disks on a Proxmox host.
+# toolkit-os: debian
+# toolkit-root: yes
+# toolkit-needs: lsblk, qm
+# toolkit-optional: pct, pvesm, blkdiscard
+# toolkit-preview: --dry-run
+# toolkit-danger: Irreversibly destroys every guest and erases all non-system disks. There is no undo.
+# toolkit-confirm: ERASE-ALL-DATA
+# toolkit-order: 90
+# toolkit-arg: --only | Restrict the wipe to these disks, e.g. sdb,sdc | text
 #                   with a live progress bar + ETA (dd) for the zeroing phase.
 #
 # SAFETY MODEL:
@@ -35,7 +49,7 @@ while [ $# -gt 0 ]; do
         --discard)    USE_DISCARD=1 ;;
         --only)       shift; ONLY_LIST="${1:-}" ;;
         --only=*)     ONLY_LIST="${1#*=}" ;;
-        -h|--help)    grep '^#' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
+        -h|--help)    grep '^#' "$0" | grep -v '^#!' | grep -v '^# toolkit-' | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
     shift

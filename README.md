@@ -28,6 +28,77 @@ self-contained, documented below, and safe to copy out and run on its own.
 This README is the project's front page and grows together with the repository: **every new
 script gets its own block** with a short description and the commands to run it.
 
+## 🎛 One entry point — `./toolkit.sh`
+
+> Everything below can be browsed, checked and started from a single TUI. It finds every script in
+> the repo, works out what each one needs, tells you whether **this** machine can run it, and starts
+> the one you pick after a single confirmation.
+
+```bash
+chmod +x toolkit.sh
+./toolkit.sh
+```
+
+<p align="center">
+  <sub>↑↓ pick a script · ⏎ see the summary and the system check · ⏎ again to run · <code>p</code> dry run · <code>o</code> options · <code>d</code> docs · <code>/</code> filter · <code>q</code> quit</sub>
+</p>
+
+Each entry is marked with what the launcher found out about your machine:
+
+| | Meaning |
+|---|---|
+| ✔ | ready — every requirement is met |
+| ▲ | runnable, but read the notes (a missing argument, a port already in use) |
+| ✖ | blocked — wrong distro, no root, a required command is missing |
+| ● | already installed / already present here |
+
+Selecting a script shows a full summary before anything runs: **what it does**, the **exact command**
+that will be executed, what it will **change** (files, ports, packages, whether it needs root) and
+the **system check** line by line. One more `⏎` starts it; the script then owns the terminal, so its
+own prompts and TUIs work normally, and you land back in the launcher when it finishes.
+
+Scripts that only need to *run* (rather than install anything) are started the same way — `netwatch`,
+`loadtest` and `harden` open their own interfaces from here.
+
+Non-interactive uses:
+
+```bash
+./toolkit.sh --list           # what was discovered, and its status on this machine
+./toolkit.sh --check          # every system check, in full
+./toolkit.sh --run harden     # run one script directly
+./toolkit.sh --run netwatch --duration 30m --yes
+```
+
+### Adding your own script
+
+Drop a `.sh` or `.py` file anywhere in the repo — **it appears in the launcher on the next run**,
+described from its own header comment. To control how it is presented, add `# toolkit-*:` lines:
+
+```bash
+# toolkit-name: Human readable name
+# toolkit-kind: installer | tool | destructive
+# toolkit-category: Containers
+# toolkit-summary: One line describing what it does.
+# toolkit-os: debian, fedora          # which systems it supports (default: any)
+# toolkit-root: yes | no | optional
+# toolkit-needs: curl, systemctl      # commands that MUST exist, or it is blocked
+# toolkit-optional: gpg               # nice to have; only mentioned
+# toolkit-detect: command -v docker   # "is it already installed here?"
+# toolkit-preview: --dry-run          # arguments for a safe preview run
+# toolkit-run: --yes                  # default arguments
+# toolkit-arg: --domain | Domain to serve on | required
+# toolkit-ports: 80,443               # ports it opens (checked for conflicts)
+# toolkit-writes: /opt/thing          # paths it creates
+# toolkit-danger: what it destroys    # shown in red for destructive scripts
+# toolkit-confirm: ERASE-ALL-DATA     # word the user must type first
+# toolkit-docs: linux/thing/README.md
+```
+
+The launcher needs nothing but Python 3 (present on every mainstream distro), and every script here
+still runs standalone — it is a convenience layer, not a dependency.
+
+---
+
 ## 🧰 Scripts
 
 | Script | Category | What it does |
@@ -35,6 +106,7 @@ script gets its own block** with a short description and the commands to run it.
 | [`proxmox-wipe.sh`](#proxmox-wipesh) | Proxmox | Destroys all guests and zeroes every non-system disk, with a live progress bar + ETA. |
 | [`install-docker.sh`](#install-dockersh) | Linux | Auto-detects the distro and installs Docker Engine + Compose v2 from Docker's official repos. |
 | [`install-pingvin-share.sh`](#install-pingvin-sharesh) | Linux | Deploys Pingvin Share via Docker behind a Caddy reverse proxy with automatic HTTPS, and opens the firewall. |
+| [`harden.sh`](#hardensh) | Linux | Audits a server's security posture, scores it, and applies the safe fixes — with anti-lockout guarantees and a rollback. |
 | [`loadtest`](#loadtest) | Linux | Authorized load / WAF / rate-limit tester — measures how well **your own** site blocks traffic, optionally through a rotating proxy pool. |
 | [`netwatch`](#netwatch) | Linux | Continuously measures a connection — ICMP, DNS, HTTP, throughput, multi-WAN failover — into SQLite, then writes a Markdown report with charts and a verdict naming the layer at fault. |
 
@@ -215,6 +287,65 @@ use `--self-signed` — Caddy serves HTTPS with its own CA (the browser shows a 
 
 ---
 
+---
+
+### `harden.sh`
+
+> 🛡 **Audit and harden a Linux server — without locking yourself out.** The default action is a read-only, scored audit; `--apply` fixes what is safe to fix, and `--rollback` undoes it.
+
+**Location:** [`linux/harden.sh`](linux/harden.sh)
+
+Checks the things that actually get servers compromised: SSH (root login, password authentication,
+empty passwords, auth attempts, grace time, X11 forwarding), the **firewall** (present, active,
+default-deny, SSH allowed), **automatic security updates**, **fail2ban**, a set of **kernel sysctls**
+(redirects, source routing, SYN cookies, ASLR, `dmesg_restrict`), **accounts** (empty passwords,
+duplicate uid 0) and what is **listening on public interfaces**. Everything is scored 0–100 with a
+grade and, for each finding, the exact flag that fixes it.
+
+`--apply` then writes an sshd drop-in, enables and configures the firewall, turns on unattended
+security updates, installs a fail2ban sshd jail and applies the sysctls.
+
+#### 🔒 Anti-lockout
+
+This is built to run on a machine you reach over SSH, so:
+
+- password logins are disabled **only** if a usable SSH key already exists for root or for the user
+  running the script — otherwise that one fix is skipped, loudly;
+- the firewall is opened for the **real** SSH port (read from the running config) *before* it is enabled;
+- the new config is validated with `sshd -t` and reverted if it is rejected — and if sshd could not
+  validate its config *before* the change either, the SSH section is skipped entirely rather than
+  edited blind;
+- sshd is **reloaded, never restarted**, so the session you are typing in survives;
+- every file touched is copied to `/var/backups/toolkit-harden/<timestamp>/` and `--rollback`
+  restores it.
+
+#### ▶️ Run
+
+```bash
+chmod +x linux/harden.sh
+./linux/harden.sh                      # audit only — changes nothing
+sudo ./linux/harden.sh --apply --dry-run   # show every change it would make
+sudo ./linux/harden.sh --apply             # apply, after typing YES
+sudo ./linux/harden.sh --rollback          # undo the last apply
+```
+
+| Flag | Description |
+|---|---|
+| `--audit` | Read-only audit (the default). |
+| `--apply` | Apply the safe fixes. |
+| `-n`, `--dry-run` | With `--apply`: print every change, do nothing. |
+| `-y`, `--yes` | Skip the `YES` confirmation. |
+| `--rollback` | Restore the most recent backup and reload the services. |
+| `--report <file>` | Also write the audit as Markdown. |
+| `--ssh-port <n>` | SSH port to keep open (default: read from `sshd_config`). |
+| `--allow-user <u>` | Restrict SSH logins to this user (`AllowUsers`). |
+| `--strict` | Exit non-zero when the audit finds failures (for CI). |
+| `--no-ssh` · `--no-firewall` · `--no-updates` · `--no-fail2ban` · `--no-sysctl` | Skip individual sections. |
+| `-h`, `--help` | Full help. |
+
+> 💡 After `--apply`, **open a second SSH session before closing the current one** — the script says
+> so too. Supported: Debian/Ubuntu and Fedora/RHEL for the apply step; the audit runs anywhere.
+
 ### `loadtest`
 
 > 🐧 **Authorized** load / WAF / rate-limit tester (Python 3, stdlib only, launched from a `.sh`). Generates configurable HTTP load against **your own** site — optionally through a rotating pool of HTTP proxies — and reports how much of it your filtering **blocked**.
@@ -318,9 +449,12 @@ chmod +x linux/netwatch/netwatch.sh
 
 ```text
 toolkit/
+├── toolkit.sh       # ← the launcher: browse, check, run everything
+├── toolkit.py       # its TUI + discovery + system checks
 ├── assets/
 │   └── logo.svg
 ├── linux/
+│   ├── harden.sh
 │   ├── install-docker.sh
 │   ├── install-pingvin-share.sh
 │   ├── loadtest/

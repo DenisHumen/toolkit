@@ -2,6 +2,21 @@
 #
 # loadtest.sh — launcher for the authorized load / WAF / rate-limit tester.
 #
+# toolkit-name: loadtest — WAF / rate-limit tester
+# toolkit-kind: tool
+# toolkit-category: Diagnostics
+# toolkit-summary: Generates authorized HTTP load against your own site and measures how much of it your filtering blocks.
+# toolkit-os: any
+# toolkit-root: no
+# toolkit-needs: python3
+# toolkit-danger: Authorized testing only — run it against systems you own or may test.
+# toolkit-docs: linux/loadtest/README.md
+# toolkit-order: 40
+# toolkit-arg: --url | Target URL you own or are authorized to test | text
+# toolkit-arg: --duration | How long to run: 30s, 5m, 1h | text
+# toolkit-arg: --concurrency | Parallel workers | number
+# toolkit-arg: --proxy | Path to a proxy list file | path
+#
 # Ensures Python 3 is present (installing it via the distro package manager if
 # needed) and then runs loadtest.py, forwarding all arguments to it.
 #

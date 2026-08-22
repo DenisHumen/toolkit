@@ -542,7 +542,6 @@ def run_dashboard(cfg, stats, stop_event, deadline):
             pass
 
     try:
-        import curses
         curses.wrapper(_loop)
         return True
     except KeyboardInterrupt:

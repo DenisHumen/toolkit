@@ -2,6 +2,21 @@
 #
 # netwatch.sh — launcher for the continuous internet quality monitor.
 #
+# toolkit-name: netwatch — internet quality monitor
+# toolkit-kind: tool
+# toolkit-category: Diagnostics
+# toolkit-summary: Watches the connection over time, stores every sample in SQLite and writes a report with charts and a verdict.
+# toolkit-os: any
+# toolkit-root: optional
+# toolkit-needs: python3
+# toolkit-optional: ping, traceroute
+# toolkit-preview: --quick --yes --no-tui
+# toolkit-docs: linux/netwatch/README.md
+# toolkit-order: 30
+# toolkit-arg: --duration | How long to monitor: 30m, 2h, 0 = until you stop it | text
+# toolkit-arg: --plan | Your subscribed speed in Mbps, for the verdict | number
+# toolkit-arg: --out | Directory to write the report into | path
+#
 # Ensures Python 3 is present (installing it via the distro package manager if
 # needed) and then runs netwatch.py, forwarding all arguments to it.
 #

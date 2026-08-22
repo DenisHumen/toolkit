@@ -2,6 +2,23 @@
 #
 # install-pingvin-share.sh — universal Pingvin Share installer via Docker.
 #
+# toolkit-name: Pingvin Share (file sharing)
+# toolkit-kind: installer
+# toolkit-category: Containers
+# toolkit-summary: Deploys Pingvin Share with Docker behind Caddy, with automatic HTTPS on your own domain.
+# toolkit-os: debian, fedora
+# toolkit-root: yes
+# toolkit-optional: curl, docker, ufw, firewall-cmd
+# toolkit-detect: docker ps --format '{{.Names}}' 2>/dev/null | grep -q pingvin && echo 'stack running'
+# toolkit-preview: --dry-run
+# toolkit-run: --yes
+# toolkit-ports: 80,443
+# toolkit-writes: /opt/pingvin-share
+# toolkit-order: 20
+# toolkit-arg: --domain | Domain to serve on — its A record must already point here | required
+# toolkit-arg: --email | Email for Let's Encrypt / ACME | text
+# toolkit-arg: --dir | Install directory (default /opt/pingvin-share) | path
+#
 # Deploys Pingvin Share (a self-hosted file-sharing platform) with Docker
 # Compose on any of the common Linux families, ready to be reached over the
 # internet through your own domain with automatic HTTPS — and lets you
@@ -91,7 +108,7 @@ while [ $# -gt 0 ]; do
         --reset-tls)  RESET_TLS=1 ;;
         -n|--dry-run) DRY_RUN=1 ;;
         -y|--yes)     ASSUME_YES=1 ;;
-        -h|--help)    grep '^#' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
+        -h|--help)    grep '^#' "$0" | grep -v '^#!' | grep -v '^# toolkit-' | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
     shift
