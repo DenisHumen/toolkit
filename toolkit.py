@@ -11,7 +11,14 @@ after a single confirmation.
     ./toolkit.sh --list           print the discovered scripts and exit
     ./toolkit.sh --check          run the system checks for everything and exit
     ./toolkit.sh --run <id> [..]  run one script non-interactively
+    ./toolkit.sh --check-update    is there a newer version on GitHub?
+    ./toolkit.sh --update          fast-forward this checkout to it
     ./toolkit.sh --help           this text
+
+While browsing, `u` opens the update screen: what changed, which files, and the
+choice to take it or leave it. The check runs in the background over the public
+GitHub API, never blocks the launcher, and is cached for a few hours; pass
+--no-update-check (or set TOOLKIT_NO_UPDATE_CHECK=1) to turn it off.
 
 Scripts describe themselves with `# toolkit-*:` comment lines in their header
 (see README). A script without them still shows up — the launcher falls back to
@@ -21,6 +28,7 @@ file into the repo is enough to make it appear here.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import select
@@ -29,7 +37,10 @@ import socket
 import subprocess
 import sys
 import textwrap
+import threading
 import time
+import urllib.error
+import urllib.request
 
 APP = "toolkit"
 VERSION = "1.0"
@@ -91,9 +102,9 @@ SEL = _c("\033[48;5;24m")
 BOX = ({"tl": "╭", "tr": "╮", "bl": "╰", "br": "╯", "h": "─", "v": "│"} if UNI
        else {"tl": "+", "tr": "+", "bl": "+", "br": "+", "h": "-", "v": "|"})
 GLYPH = ({"ok": "✔", "warn": "▲", "bad": "✖", "note": "●", "dot": "▪",
-          "arrow": "▸", "run": "▶"} if UNI
+          "arrow": "▸", "run": "▶", "up": "⬆"} if UNI
          else {"ok": "+", "warn": "!", "bad": "x", "note": "*", "dot": "-",
-               "arrow": ">", "run": ">"})
+               "arrow": ">", "run": ">", "up": "^"})
 STATUS_COLOR = {"ok": GREEN, "warn": YELLOW, "bad": RED, "note": BLUE, "dot": GREY}
 
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
@@ -549,6 +560,263 @@ class System:
         ]
 
 
+
+
+# --------------------------------------------------------------------------- #
+# updates — is there a newer version of this repository?
+# --------------------------------------------------------------------------- #
+UPDATE_TTL = 6 * 3600            # how long a check stays fresh
+REPO_FALLBACK = "DenisHumen/toolkit"
+GITHUB_API = "https://api.github.com"
+
+
+def cache_dir():
+    override = os.environ.get("TOOLKIT_CACHE_DIR")
+    if override:
+        return override
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache")
+    return os.path.join(base, APP)
+
+
+def ago(iso):
+    """'2026-08-22T19:36:44Z' -> '4 hours ago'."""
+    if not iso:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        when = datetime.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S").replace(
+            tzinfo=timezone.utc)
+        seconds = (datetime.now(timezone.utc) - when).total_seconds()
+    except Exception:
+        return ""
+    if seconds < 90:
+        return "just now"
+    for limit, unit, name in ((3600, 60, "minute"), (86400, 3600, "hour"),
+                              (2592000, 86400, "day"), (31536000, 2592000, "month")):
+        if seconds < limit:
+            n = int(seconds // unit)
+            return f"{n} {name}{'s' if n != 1 else ''} ago"
+    n = int(seconds // 31536000)
+    return f"{n} year{'s' if n != 1 else ''} ago"
+
+
+class Updater:
+    """Asks GitHub whether this checkout is behind, without ever blocking the UI.
+
+    The check runs on a background thread and reads only the public API over
+    HTTPS, so it never touches credentials and cannot stop to ask for a
+    passphrase. The result is cached, so opening the launcher repeatedly does not
+    hammer the API — and when the cache is fresh, no network call happens at all.
+    """
+
+    def __init__(self, enabled=True):
+        self.enabled = enabled
+        self.status = "checking" if enabled else "off"
+        self.ahead = 0
+        self.commits = []
+        self.files = []
+        self.error = ""
+        self.slug = REPO_FALLBACK
+        self.branch = "main"
+        self.local_sha = ""
+        self.remote_sha = ""
+        self.remote_when = ""
+        self.is_git = False
+        self.dirty = False
+        self.diverged = False
+        self.dirty_files = []
+        self._thread = None
+        self._cache_file = os.path.join(cache_dir(), "update.json")
+        self._skipped = ""
+        self._probe_git()
+        self._load_cache()
+
+    # -- local facts ------------------------------------------------------ #
+    def _git(self, *args):
+        rc, out = _run(["git", "-C", REPO] + list(args), timeout=8)
+        return out.strip() if rc == 0 else ""
+
+    def _probe_git(self):
+        if not shutil.which("git") or not os.path.isdir(os.path.join(REPO, ".git")):
+            self.is_git = False
+            return
+        self.is_git = bool(self._git("rev-parse", "--is-inside-work-tree"))
+        if not self.is_git:
+            return
+        self.local_sha = self._git("rev-parse", "HEAD")
+        branch = self._git("rev-parse", "--abbrev-ref", "HEAD")
+        if branch and branch != "HEAD":
+            self.branch = branch
+        url = self._git("remote", "get-url", "origin")
+        m = re.search(r"github\.com[:/]+([^/]+)/([^/\s]+?)(?:\.git)?$", url or "")
+        if m:
+            self.slug = f"{m.group(1)}/{m.group(2)}"
+        status = self._git("status", "--porcelain")
+        self.dirty_files = [ln.strip() for ln in status.splitlines() if ln.strip()]
+        self.dirty = bool(self.dirty_files)
+
+    # -- cache ------------------------------------------------------------ #
+    def _load_cache(self):
+        try:
+            with open(self._cache_file, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            return
+        self._skipped = data.get("skipped", "")
+        if data.get("local_sha") != self.local_sha:
+            return                       # the checkout moved; the cache is stale
+        self.remote_sha = data.get("remote_sha", "")
+        self.remote_when = data.get("remote_when", "")
+        self.ahead = data.get("ahead", 0)
+        self.commits = data.get("commits", [])
+        self.files = data.get("files", [])
+        self.diverged = data.get("diverged", False)
+        if time.time() - data.get("checked_at", 0) < UPDATE_TTL:
+            self.status = self._verdict()
+
+    def _save_cache(self):
+        try:
+            os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
+            with open(self._cache_file, "w", encoding="utf-8") as fh:
+                json.dump({"checked_at": time.time(), "local_sha": self.local_sha,
+                           "remote_sha": self.remote_sha, "ahead": self.ahead,
+                           "commits": self.commits[:20], "files": self.files[:40],
+                           "remote_when": self.remote_when,
+                           "diverged": self.diverged,
+                           "skipped": self._skipped}, fh)
+        except Exception:
+            pass
+
+    def _verdict(self):
+        if not self.remote_sha:
+            return "unknown"
+        if self.local_sha and self.remote_sha.startswith(self.local_sha[:12]):
+            return "current"
+        return "diverged" if self.diverged else "behind"
+
+    @property
+    def available(self):
+        """Is there something to tell the user about right now?"""
+        return (self.status == "behind"
+                and self.remote_sha
+                and self.remote_sha != self._skipped)
+
+    # -- the check -------------------------------------------------------- #
+    def start(self):
+        if not self.enabled or self.status in ("current", "behind", "off"):
+            return self                 # a fresh cache already answered this
+        self._thread = threading.Thread(target=self._check, daemon=True,
+                                        name="update-check")
+        self._thread.start()
+        return self
+
+    def _api(self, path, timeout=7):
+        req = urllib.request.Request(
+            GITHUB_API + path,
+            headers={"Accept": "application/vnd.github+json",
+                     "User-Agent": f"{APP}/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read(2_000_000).decode("utf-8", "replace"))
+
+    def _check(self):
+        try:
+            head = self._api(f"/repos/{self.slug}/commits/{self.branch}")
+            self.remote_sha = head.get("sha", "")
+            self.remote_when = (head.get("commit", {}).get("committer", {})
+                                .get("date", ""))
+            if not self.local_sha:
+                # No git checkout: all we can honestly say is what is on GitHub.
+                self.status = "no-git"
+                self.commits = [self._commit_entry(head)]
+                self._save_cache()
+                return
+            self.diverged = False
+            if self._verdict() == "current":
+                self.status = "current"
+                self.ahead = 0
+                self.commits = []
+                self.files = []
+                self._save_cache()
+                return
+            self._load_diff()
+            self.status = "diverged" if self.diverged else "behind"
+        except urllib.error.HTTPError as e:
+            self.status = "error"
+            self.error = (f"GitHub said {e.code}"
+                          + (" — rate limited, try later" if e.code == 403 else ""))
+        except Exception as e:
+            self.status = "offline"
+            self.error = f"{type(e).__name__}: {e}"
+        self._save_cache()
+
+    @staticmethod
+    def _commit_entry(node):
+        commit = node.get("commit", {})
+        message = (commit.get("message") or "").splitlines()[0]
+        return {"sha": (node.get("sha") or "")[:7],
+                "message": message,
+                "when": ago(commit.get("committer", {}).get("date", "")),
+                "author": (commit.get("author", {}) or {}).get("name", "")}
+
+    def _load_diff(self):
+        """What changed between here and there — the part worth reading."""
+        try:
+            diff = self._api(
+                f"/repos/{self.slug}/compare/{self.local_sha}...{self.branch}")
+        except Exception:
+            # GitHub does not know this commit, so it is a local one (or a fork).
+            # There may be nothing to update *to* — claiming an update here would
+            # nag every developer with unpushed work.
+            self.diverged = True
+            self.ahead = 0
+            self.commits = []
+            self.files = []
+            return
+        self.diverged = False
+        self.ahead = diff.get("ahead_by", 0)
+        self.commits = [self._commit_entry(c) for c in reversed(diff.get("commits", []))]
+        self.files = [f.get("filename", "") for f in diff.get("files", [])]
+
+    # -- acting on it ----------------------------------------------------- #
+    def skip(self):
+        self._skipped = self.remote_sha
+        self._save_cache()
+
+    def can_update(self):
+        """(possible, why not)"""
+        if not self.is_git:
+            return False, ("this is not a git checkout — download it again from "
+                           f"https://github.com/{self.slug}")
+        if not shutil.which("git"):
+            return False, "git is not installed"
+        # Divergence first: it is the reason no fast-forward exists at all, and
+        # stashing the working tree would not change that.
+        if self.diverged:
+            return False, ("this checkout has commits GitHub does not know about, "
+                           "so it cannot be fast-forwarded — push or reset them first")
+        if self.dirty:
+            return False, (f"{len(self.dirty_files)} local change(s) would be "
+                           "overwritten — commit or stash them first")
+        return True, ""
+
+    def pull(self):
+        """Fast-forward only: an update must never rewrite local history."""
+        return subprocess.call(["git", "-C", REPO, "pull", "--ff-only",
+                                "origin", self.branch])
+
+    def summary_line(self):
+        if self.available:
+            count = (f"{self.ahead} new commit{'s' if self.ahead != 1 else ''}"
+                     if self.ahead else "a newer version")
+            return (f"{MAGENTA}{GLYPH['up']} Update available{C0} {GREY}·{C0} "
+                    f"{count} on {self.slug} {GREY}·{C0} press {WHITE}u{C0}")
+        if self.status == "no-git" and self.remote_sha != self._skipped:
+            return (f"{MAGENTA}{GLYPH['up']} Newer version on GitHub{C0} {GREY}·{C0} "
+                    f"this copy is not a git checkout {GREY}·{C0} press {WHITE}u{C0}")
+        return ""
+
+
 # --------------------------------------------------------------------------- #
 # script discovery
 # --------------------------------------------------------------------------- #
@@ -958,7 +1226,7 @@ def footer(pairs):
     return "  " + f"{FAINT}·{C0} ".join(x + " " for x in out)
 
 
-def render_browser(scripts, system, cursor, scroll, flt):
+def render_browser(scripts, system, cursor, scroll, flt, updater=None):
     w, h = term_size()
     w = min(w, 200)
     kinds = {}
@@ -970,6 +1238,9 @@ def render_browser(scripts, system, cursor, scroll, flt):
             f"{GREY}{len(scripts)} script{'s' if len(scripts) != 1 else ''} discovered"
             f"{C0}   {counts}"
             + (f"   {YELLOW}filter: {flt}{C0}" if flt else "")]
+    notice = updater.summary_line() if updater else ""
+    if notice:
+        head.append(notice)
     lines = panel(f"{BOLD}{APP} {VERSION}{C0}", head, w, accent=BLUE)
 
     body_h = max(8, h - len(lines) - 2)
@@ -1060,7 +1331,8 @@ def render_browser(scripts, system, cursor, scroll, flt):
                                 if scripts else GREY))
     lines.append(footer([("↑↓", "move"), ("⏎", "open"), ("p", "preview"),
                          ("d", "docs"), ("o", "options"), ("/", "filter"),
-                         ("s", "system"), ("?", "help"), ("q", "quit")]))
+                         ("s", "system"), ("u", "updates"), ("?", "help"),
+                         ("q", "quit")]))
     return lines, scroll
 
 
@@ -1411,7 +1683,165 @@ def item_screen(script, system):
             return
 
 
-def browse(all_scripts, system):
+def update_screen(updater):
+    """What changed, and the choice to take it or leave it.
+
+    Returns "restart" when the update succeeded and the launcher should reload
+    itself — the code that is running is the code that just changed.
+    """
+    while True:
+        w, _h = term_size()
+        w = min(w, 104)
+        inner = w - 4
+        possible, blocker = updater.can_update()
+        lines = [""]
+
+        if updater.status == "checking":
+            lines.append(f"{GREY}Asking GitHub…{C0}")
+            lines.append("")
+            accent, title = GREY, "Checking for updates"
+            keys = [("r", "check again"), ("Esc", "back")]
+        elif updater.status in ("offline", "error"):
+            lines.append(f"{YELLOW}{GLYPH['warn']} Could not reach GitHub.{C0}")
+            lines.append("")
+            for chunk in wrap(updater.error or "no details", inner - 2, "  "):
+                lines.append(f"{GREY}{chunk}{C0}")
+            lines.append("")
+            lines.append(f"{GREY}The launcher works exactly the same offline — this"
+                         f" only means the version could not be compared.{C0}")
+            accent, title = YELLOW, "Update check failed"
+            keys = [("r", "try again"), ("Esc", "back")]
+        elif updater.status == "diverged":
+            lines.append(f"{CYAN}{GLYPH['note']} This checkout has its own commits.{C0}")
+            lines.append("")
+            for chunk in wrap(
+                    f"GitHub does not know commit {updater.local_sha[:7]}, so there is "
+                    f"nothing to compare against {updater.slug}@{updater.branch} and "
+                    f"nothing that could be fast-forwarded. Push your work, or reset "
+                    f"to the remote branch, and the check will start working again.",
+                    inner - 2):
+                lines.append(f"{GREY}{chunk}{C0}")
+            accent, title = CYAN, "Local commits"
+            keys = [("r", "check again"), ("Esc", "back")]
+        elif updater.status == "current":
+            lines.append(f"{GREEN}{GLYPH['ok']} You are on the latest version.{C0}")
+            lines.append("")
+            lines.append(f"{GREY}{updater.slug}@{updater.branch}"
+                         f"  ·  {updater.local_sha[:7]}{C0}")
+            accent, title = GREEN, "Up to date"
+            keys = [("r", "check again"), ("Esc", "back")]
+        else:
+            count = updater.ahead
+            headline = (f"{count} new commit{'s' if count != 1 else ''}"
+                        if count else "A newer version")
+            lines.append(f"{WHITE}{headline} on "
+                         f"{BOLD}{updater.slug}@{updater.branch}{C0}"
+                         + (f"  {GREY}({ago(updater.remote_when)}){C0}"
+                            if updater.remote_when else ""))
+            lines.append("")
+            lines.append(f"  {GREY}here  {C0}{updater.local_sha[:7] or '—'}")
+            lines.append(f"  {GREY}there {C0}{MAGENTA}{updater.remote_sha[:7]}{C0}")
+
+            if updater.commits:
+                lines.append("")
+                lines.append(f"{BOLD}What's new{C0}")
+                stamp = max((len(c["when"]) for c in updater.commits[:8]), default=0)
+                room = inner - 13 - stamp
+                for c in updater.commits[:8]:
+                    text = pad(clip(c["message"], room), room)
+                    lines.append(f"  {MAGENTA}{c['sha']}{C0}  {text}  "
+                                 f"{FAINT}{c['when']:>{stamp}}{C0}")
+                if len(updater.commits) > 8:
+                    lines.append(f"  {FAINT}…and {len(updater.commits) - 8} more{C0}")
+
+            if updater.files:
+                lines.append("")
+                lines.append(f"{BOLD}Files that change{C0}")
+                joined = ", ".join(updater.files[:14])
+                if len(updater.files) > 14:
+                    joined += f", and {len(updater.files) - 14} more"
+                for chunk in wrap(joined, inner - 4, "  "):
+                    lines.append(f"{GREY}{chunk}{C0}")
+
+            lines.append("")
+            lines.append(f"{BOLD}How it updates{C0}")
+            lines.append(f"  {CYAN}git pull --ff-only origin {updater.branch}{C0}")
+            lines.append(f"  {GREY}fast-forward only — it can never rewrite or discard"
+                         f" a local commit{C0}")
+            lines.append("")
+            if possible:
+                lines.append(f"  {GREEN}{GLYPH['ok']}{C0} working tree is clean")
+                lines.append("")
+                lines.append(f"{GREEN}{GLYPH['ok']} Ready to update.{C0}")
+                accent = GREEN
+                keys = [("⏎", "update now"), ("s", "skip this version"),
+                        ("r", "re-check"), ("Esc", "back")]
+            else:
+                lines.append(f"  {YELLOW}{GLYPH['warn']}{C0} cannot update here")
+                for chunk in wrap(blocker, inner - 6, "    "):
+                    lines.append(f"{GREY}{chunk}{C0}")
+                if updater.dirty_files:
+                    lines.append("")
+                    for entry in updater.dirty_files[:6]:
+                        lines.append(f"    {FAINT}{entry}{C0}")
+                lines.append("")
+                lines.append(f"{YELLOW}{GLYPH['warn']} Nothing was changed.{C0}")
+                accent = YELLOW
+                keys = [("s", "skip this version"), ("r", "re-check"), ("Esc", "back")]
+            title = "Update available"
+            lines.append("")
+            lines.append(f"{FAINT}https://github.com/{updater.slug}/compare/"
+                         f"{updater.local_sha[:7]}...{updater.branch}{C0}")
+
+        lines.append("")
+        frame = panel(f"{BOLD}{title}{C0}", lines, w, accent=accent)
+        frame.append(footer(keys))
+        SCREEN.paint(frame)
+
+        key = KEYS.get(0.4)
+        if key in ("esc", "q"):
+            return None
+        if key in ("r", "R"):
+            updater.status = "checking"
+            updater.enabled = True
+            updater.start()
+            continue
+        if key in ("s", "S") and updater.remote_sha:
+            updater.skip()
+            SCREEN.leave()
+            ok(f"Skipped {updater.remote_sha[:7]} — you will be told about the next one.")
+            time.sleep(1.2)
+            SCREEN.enter()
+            return None
+        if key == "enter" and updater.status == "behind" and possible:
+            return apply_update(updater)
+
+
+def apply_update(updater):
+    SCREEN.leave()
+    w, _h = term_size()
+    rule = BOX["h"] * min(w - 1, 100)
+    print(f"\n{MAGENTA}{rule}{C0}")
+    print(f" {BOLD}Updating {updater.slug}@{updater.branch}{C0}")
+    print(f" {GREY}git pull --ff-only origin {updater.branch}{C0}")
+    print(f"{MAGENTA}{rule}{C0}\n", flush=True)
+    rc = updater.pull()
+    print(f"\n{MAGENTA}{rule}{C0}")
+    if rc == 0:
+        print(f" {GREEN}{GLYPH['ok']} Updated.{C0} "
+              f"{GREY}Reloading the launcher so the new version is the one running.{C0}")
+        print(f"{MAGENTA}{rule}{C0}")
+        pause("Press Enter to reload…")
+        return "restart"
+    print(f" {RED}{GLYPH['bad']} git exited with status {rc} — nothing was changed.{C0}")
+    print(f" {GREY}Run 'git -C {REPO} pull --ff-only' yourself to see why.{C0}")
+    print(f"{MAGENTA}{rule}{C0}")
+    pause("Press Enter to return…")
+    SCREEN.enter()
+    return None
+
+
+def browse(all_scripts, system, updater=None):
     cursor, scroll, flt = 0, 0, ""
     scripts = all_scripts
     SCREEN.enter()
@@ -1425,7 +1855,8 @@ def browse(all_scripts, system):
             else:
                 scripts = all_scripts
             cursor = max(0, min(cursor, len(scripts) - 1)) if scripts else 0
-            frame, scroll = render_browser(scripts, system, cursor, scroll, flt)
+            frame, scroll = render_browser(scripts, system, cursor, scroll, flt,
+                                           updater)
             SCREEN.paint(frame)
             key = KEYS.get(0.4)
             if key is None:
@@ -1471,6 +1902,9 @@ def browse(all_scripts, system):
                 evaluate(scripts[cursor], system, deep=False)
             elif key in ("d", "D"):
                 docs_screen(scripts[cursor])
+            elif key in ("u", "U"):
+                if updater and update_screen(updater) == "restart":
+                    return "restart"
             elif key in ("s", "S"):
                 system_screen(system)
             elif key in ("?", "h", "H"):
@@ -1492,7 +1926,7 @@ def browse(all_scripts, system):
 # --------------------------------------------------------------------------- #
 # non-interactive entry points
 # --------------------------------------------------------------------------- #
-def print_list(scripts, system):
+def print_list(scripts, system, updater=None):
     print()
     print(f" {BOLD}{APP} {VERSION}{C0} {GREY}·{C0} {system.summary_line()}")
     print()
@@ -1507,6 +1941,10 @@ def print_list(scripts, system):
               f"{KIND_COLOR.get(s.kind, GREY)}{s.kind:<12}{C0}{GREY}{s.rel}{C0}")
         print(f"     {GREY}{ellipsis(s.summary, 94)}{C0}")
     print()
+    notice = updater.summary_line() if updater else ""
+    if notice:
+        print(" " + notice.replace("press u", "run ./toolkit.sh --update"))
+        print()
     print(f" {GREY}run one with:{C0} ./toolkit.sh --run <name>   "
           f"{GREY}or just{C0} ./toolkit.sh")
     print()
@@ -1534,6 +1972,44 @@ def find_script(scripts, needle):
     return partial[0] if len(partial) == 1 else None
 
 
+def print_update(updater):
+    print()
+    if updater.status == "behind":
+        count = updater.ahead
+        print(f" {MAGENTA}{GLYPH['up']} Update available{C0} — "
+              f"{count or 'a newer version'}"
+              f"{' new commit' + ('s' if count != 1 else '') if count else ''}"
+              f" on {BOLD}{updater.slug}@{updater.branch}{C0}")
+        print()
+        for c in updater.commits[:10]:
+            print(f"   {MAGENTA}{c['sha']}{C0}  {clip(c['message'], 70)}"
+                  f"   {GREY}{c['when']}{C0}")
+        possible, blocker = updater.can_update()
+        print()
+        if possible:
+            print(f" {GREY}update with:{C0} ./toolkit.sh --update")
+        else:
+            print(f" {YELLOW}{GLYPH['warn']}{C0} {blocker}")
+    elif updater.status == "current":
+        print(f" {GREEN}{GLYPH['ok']} Up to date{C0} — "
+              f"{updater.slug}@{updater.branch} {GREY}{updater.local_sha[:7]}{C0}")
+    elif updater.status == "no-git":
+        print(f" {MAGENTA}{GLYPH['up']} A newer version may exist{C0} — this copy is"
+              f" not a git checkout, so it cannot be compared or updated in place.")
+        print(f" {GREY}https://github.com/{updater.slug}{C0}")
+    else:
+        print(f" {YELLOW}{GLYPH['warn']} Could not check{C0} — "
+              f"{updater.error or 'no details'}")
+    print()
+
+
+def wait_for(updater, seconds=12):
+    thread = getattr(updater, "_thread", None)
+    if thread:
+        thread.join(timeout=seconds)
+    return updater
+
+
 def main(argv):
     global KEYS
     if any(a in ("-h", "--help", "help") for a in argv):
@@ -1542,6 +2018,24 @@ def main(argv):
     if "--version" in argv:
         print(f"{APP} {VERSION}")
         return 0
+
+    check_updates = ("--no-update-check" not in argv
+                     and os.environ.get("TOOLKIT_NO_UPDATE_CHECK") != "1")
+
+    if "--check-update" in argv:
+        print_update(wait_for(Updater(enabled=True).start()))
+        return 0
+    if "--update" in argv:
+        updater = wait_for(Updater(enabled=True).start())
+        if updater.status != "behind":
+            print_update(updater)
+            return 0
+        possible, blocker = updater.can_update()
+        if not possible:
+            print_update(updater)
+            die(blocker)
+        print_update(updater)
+        return updater.pull()
 
     system = System()
     system.check_internet()
@@ -1553,7 +2047,8 @@ def main(argv):
         evaluate(s, system, deep=deep)
 
     if "--list" in argv or "-l" in argv:
-        print_list(scripts, system)
+        # Cache only: listing scripts should not wait on the network.
+        print_list(scripts, system, Updater(enabled=False))
         return 0
     if "--check" in argv:
         print_checks(scripts, system)
@@ -1577,13 +2072,20 @@ def main(argv):
                           pause_after=False)
 
     if not sys.stdin.isatty() or not _TTY:
-        print_list(scripts, system)
+        print_list(scripts, system, Updater(enabled=False))
         warn("Not a terminal — showing the list instead of the interactive browser.")
         return 0
 
+    updater = Updater(enabled=check_updates).start()
     with KeyReader() as keys:
         KEYS = keys
-        return browse(scripts, system)
+        outcome = browse(scripts, system, updater)
+    if outcome == "restart":
+        # The file that was just replaced is the one running: start it again so
+        # the update actually takes effect.
+        os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)]
+                 + [a for a in argv if a != "--no-update-check"])
+    return 0
 
 
 KEYS = None

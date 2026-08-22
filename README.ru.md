@@ -72,6 +72,50 @@ chmod +x toolkit.sh
 ./toolkit.sh --run netwatch --duration 30m --yes
 ```
 
+### Обновления
+
+При запуске лаунчер **в фоне** спрашивает у GitHub, не отстала ли эта копия. Проверка ничего не
+блокирует, не требует ключей (публичный API по HTTPS), а результат кэшируется на несколько часов —
+пока кэш свежий, в сеть вообще никто не ходит. Если что-то новое есть, в шапке появляется строка:
+
+```text
+╭─ toolkit 1.0 ─────────────────────────────────────────────────────────────────╮
+│ Ubuntu 24.04.4 LTS · kernel 6.6.114 · x86_64 · apt · systemd ✔ · sudo · net ✔  │
+│ 8 scripts discovered   2 installers  5 tools  1 destructive                    │
+│ ⬆ Update available · 3 new commits on DenisHumen/toolkit · press u             │
+╰───────────────────────────────────────────────────────────────────────────────╯
+```
+
+По `u` открывается экран с тем, что именно изменилось: каждый коммит с сообщением и возрастом,
+список файлов и точная команда, которая будет выполнена. Решение остаётся за вами:
+
+```text
+ What's new
+   a1b2c3d  feat(certcheck): warn before a TLS certificate expires    4 hours ago
+   e4f5a6b  fix(backup): keep sparse files sparse                       1 day ago
+   0c9d8e7  docs: explain the anti-lockout rules                       2 days ago
+
+ How it updates
+   git pull --ff-only origin main
+   fast-forward only — it can never rewrite or discard a local commit
+
+ ✔ Ready to update
+   ⏎ update now    s skip this version    r re-check    Esc back
+```
+
+`⏎` обновляет и перезапускает лаунчер, чтобы дальше работала уже новая версия. `s` заглушает
+конкретно эту версию, пока не выйдет следующая. Без нажатия клавиши не происходит ничего.
+
+Он предпочитает отказать, а не угадать: изменённое рабочее дерево, локальные коммиты, которых нет на
+GitHub, или копия, скачанная не через git, — во всех случаях будет объяснение, а не обновление.
+Из командной строки:
+
+```bash
+./toolkit.sh --check-update      # что нового, ничего не меняя
+./toolkit.sh --update            # перемотать эту копию вперёд
+./toolkit.sh --no-update-check   # или TOOLKIT_NO_UPDATE_CHECK=1, чтобы выключить
+```
+
 ### Как добавить свой скрипт
 
 Положите файл `.sh` или `.py` куда угодно в репозиторий — **он появится в лаунчере при следующем

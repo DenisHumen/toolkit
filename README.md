@@ -70,6 +70,51 @@ Non-interactive uses:
 ./toolkit.sh --run netwatch --duration 30m --yes
 ```
 
+### Staying up to date
+
+When the launcher starts it asks GitHub, **in the background**, whether this checkout is behind. The
+check never blocks anything, needs no credentials (public API over HTTPS), and its answer is cached
+for a few hours — when the cache is fresh, no network call happens at all. If something is new, a
+line appears in the header:
+
+```text
+╭─ toolkit 1.0 ─────────────────────────────────────────────────────────────────╮
+│ Ubuntu 24.04.4 LTS · kernel 6.6.114 · x86_64 · apt · systemd ✔ · sudo · net ✔  │
+│ 8 scripts discovered   2 installers  5 tools  1 destructive                    │
+│ ⬆ Update available · 3 new commits on DenisHumen/toolkit · press u             │
+╰───────────────────────────────────────────────────────────────────────────────╯
+```
+
+Pressing `u` shows what actually changed — every commit with its message and age, the files that
+will change, and the exact command that will run — then leaves the decision to you:
+
+```text
+ What's new
+   a1b2c3d  feat(certcheck): warn before a TLS certificate expires    4 hours ago
+   e4f5a6b  fix(backup): keep sparse files sparse                       1 day ago
+   0c9d8e7  docs: explain the anti-lockout rules                       2 days ago
+
+ How it updates
+   git pull --ff-only origin main
+   fast-forward only — it can never rewrite or discard a local commit
+
+ ✔ Ready to update
+   ⏎ update now    s skip this version    r re-check    Esc back
+```
+
+`⏎` updates and reloads the launcher, so the version you continue in is the one that just arrived.
+`s` silences that particular version until a newer one appears. Nothing happens without a keypress.
+
+It refuses rather than guesses: a modified working tree, a checkout with commits GitHub has never
+seen, or a copy that is not a git clone all produce an explanation instead of an update. From the
+command line:
+
+```bash
+./toolkit.sh --check-update      # what is new, without changing anything
+./toolkit.sh --update            # fast-forward this checkout
+./toolkit.sh --no-update-check   # or TOOLKIT_NO_UPDATE_CHECK=1, to turn it off
+```
+
 ### Adding your own script
 
 Drop a `.sh` or `.py` file anywhere in the repo — **it appears in the launcher on the next run**,
