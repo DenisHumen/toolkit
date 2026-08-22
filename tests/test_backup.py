@@ -144,18 +144,38 @@ def main():
         s.check("--stop checks the project exists before stopping anything",
                 rc != 0 and "no such directory" in out, out[-200:])
 
-    # Everything that needs root must say so and stop, not sit on a password
-    # prompt: this is the failure mode that hangs a cron job forever.
+    # The property that matters is that it never sits on a password prompt with
+    # nobody there to answer — that is what hangs a timer or a cron job forever.
+    # What it does instead depends on the machine: where sudo is passwordless it
+    # should simply proceed, and where it is not it should explain and stop.
     if os.geteuid() != 0:
+        passwordless = subprocess.run(["sudo", "-n", "true"],
+                                      capture_output=True).returncode == 0
         with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "d")
             rc, out = sh(["bash", BACKUP, "--path", "/etc/shadow",
-                          "--dest", os.path.join(tmp, "d"), "--yes"], timeout=60)
-            s.check("an unreadable source fails fast with an explanation",
-                    rc != 0 and "re-run with sudo" in out, out[-200:])
+                          "--dest", dest, "--yes"], timeout=60)
+            s.check("a root-only source never waits for a password",
+                    rc != 124, "it hung: " + out[-200:])
+            if passwordless:
+                s.check("with passwordless sudo it elevates and proceeds",
+                        rc == 0, out[-250:])
+                subprocess.run(["sudo", "-n", "rm", "-rf", dest],
+                               capture_output=True)
+            else:
+                s.check("without a usable sudo it says what to do instead",
+                        rc != 0 and "re-run with sudo" in out, out[-250:])
+
             rc, out = sh(["bash", BACKUP, "--path", "/etc/hostname",
-                          "--dest", "/root/nope", "--yes"], timeout=60)
-            s.check("an unwritable destination fails fast too",
-                    rc != 0 and "cannot write" in out, out[-200:])
+                          "--dest", "/root/nope-toolkit-test", "--yes"], timeout=60)
+            s.check("an unwritable destination never waits either",
+                    rc != 124, "it hung: " + out[-200:])
+            if passwordless:
+                subprocess.run(["sudo", "-n", "rm", "-rf", "/root/nope-toolkit-test"],
+                               capture_output=True)
+            else:
+                s.check("and explains which path it could not write",
+                        rc != 0 and "cannot write" in out, out[-250:])
     else:
         s.skip("privilege escalation messages", "running as root")
 
