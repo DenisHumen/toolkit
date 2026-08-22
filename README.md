@@ -125,6 +125,7 @@ container to prove the rollback really rolls back. See [`tests/README.md`](tests
 | [`install-docker.sh`](#install-dockersh) | Linux | Auto-detects the distro and installs Docker Engine + Compose v2 from Docker's official repos. |
 | [`install-pingvin-share.sh`](#install-pingvin-sharesh) | Linux | Deploys Pingvin Share via Docker behind a Caddy reverse proxy with automatic HTTPS, and opens the firewall. |
 | [`harden.sh`](#hardensh) | Linux | Audits a server's security posture, scores it, and applies the safe fixes — with anti-lockout guarantees and a rollback. |
+| [`backup.sh`](#backupsh) | Linux | Archives chosen paths and Docker volumes, verifies every archive, prunes old ones, and restores them — into a staging directory unless you say otherwise. |
 | [`loadtest`](#loadtest) | Linux | Authorized load / WAF / rate-limit tester — measures how well **your own** site blocks traffic, optionally through a rotating proxy pool. |
 | [`netwatch`](#netwatch) | Linux | Continuously measures a connection — ICMP, DNS, HTTP, throughput, multi-WAN failover — into SQLite, then writes a Markdown report with charts and a verdict naming the layer at fault. |
 
@@ -364,6 +365,58 @@ sudo ./linux/harden.sh --rollback          # undo the last apply
 > 💡 After `--apply`, **open a second SSH session before closing the current one** — the script says
 > so too. Supported: Debian/Ubuntu and Fedora/RHEL for the apply step; the audit runs anywhere.
 
+---
+
+### `backup.sh`
+
+> 💾 **Verified, restorable backups** of the directories and Docker volumes a small server actually loses. Writes a plain `tar` archive, reads it back to prove it is intact, records a checksum, prunes old ones — and restores into a staging directory unless you explicitly ask for in-place.
+
+**Location:** [`linux/backup.sh`](linux/backup.sh)
+
+A backup nobody has restored is a rumour. This one is a plain `tar` stream (zstd if available,
+gzip otherwise), so a restore never depends on this script still existing — `tar -xf` is enough.
+After writing, the archive is read back end to end and a SHA-256 is stored beside it along with a
+manifest saying what went in, how big it was, how long it took, and **whether the copy was
+consistent**.
+
+Consistency is the part most backup scripts quietly get wrong: copying a database while it is being
+written to can capture a torn file. Pass `--stop <compose-dir>` and the stack is brought down for
+the copy and started again afterwards; without it the copy is "hot" and both the run and the
+manifest say so.
+
+`--restore` defaults to a **staging directory** — nothing on the live system is touched until you
+have looked at what came out and re-run with `--in-place` (which asks you to type `RESTORE`).
+
+#### ▶️ Run
+
+```bash
+chmod +x linux/backup.sh
+./linux/backup.sh --auto --dry-run                    # what would be archived, and how big
+sudo ./linux/backup.sh --path /opt/pingvin-share --stop /opt/pingvin-share
+sudo ./linux/backup.sh --list                          # what exists, with sizes and dates
+sudo ./linux/backup.sh --verify <archive>              # re-check an old one
+sudo ./linux/backup.sh --restore <archive>             # unpack into a staging directory
+sudo ./linux/backup.sh --install-timer daily           # run it every night
+```
+
+| Flag | Description |
+|---|---|
+| `--path <dir>` · `--volume <name>` | Add a directory, or a Docker named volume (both repeatable). |
+| `--auto` | Detect Compose projects under `/opt`, plus `/etc`. |
+| `--stop <dir>` | `docker compose stop` this project for the copy, then start it again. |
+| `--dest <dir>` · `--name <label>` | Where archives live (default `/var/backups/toolkit`) · archive name prefix. |
+| `--exclude <glob>` | Skip matching paths (repeatable). |
+| `--keep <n>` · `--keep-days <n>` | Keep the newest *n* archives (default `7`) · also drop anything older than *n* days. |
+| `--rsync <target>` | Copy the finished archive to another host. |
+| `--list` · `--verify <file>` | List what exists · re-check an archive against its checksum. |
+| `--restore <file>` · `--to <dir>` · `--in-place` | Restore into a staging directory · pick the directory · write back to the original paths. |
+| `--install-timer <daily\|weekly\|hourly>` · `--uninstall-timer` | Install or remove a systemd timer that runs exactly the flags you gave. |
+| `-n`, `--dry-run` · `-y`, `--yes` · `-h`, `--help` | Preview · no prompts · full help. |
+
+> 💡 The round trip is tested, not assumed: the suite creates a backup in a container, deletes the
+> source, restores it and compares checksums — then truncates an archive to confirm verification
+> notices.
+
 ### `loadtest`
 
 > 🐧 **Authorized** load / WAF / rate-limit tester (Python 3, stdlib only, launched from a `.sh`). Generates configurable HTTP load against **your own** site — optionally through a rotating pool of HTTP proxies — and reports how much of it your filtering **blocked**.
@@ -472,6 +525,7 @@ toolkit/
 ├── assets/
 │   └── logo.svg
 ├── linux/
+│   ├── backup.sh
 │   ├── harden.sh
 │   ├── install-docker.sh
 │   ├── install-pingvin-share.sh

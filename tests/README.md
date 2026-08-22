@@ -35,6 +35,7 @@ two sequences delivered in a single read, which is what a held-down key actually
 | `test_launcher_run.py` | `--list`, `--check`, `--run`, unknown names, and the one-click path end to end: select → summary → run → return. |
 | `test_netwatch_tui.py` | netwatch's menu, the arrow-key regression, editing a setting (raw mode → prompt → raw mode), and with `--full` the live dashboard and `q`. |
 | `test_netwatch_analysis.py` | The analysis, fed a synthesised dual-WAN capture with a known answer: four failovers, per-uplink loss and latency, the outages they caused, the verdict, the report and its charts. |
+| `test_backup.py` | A full round trip in a container: real files in, source destroyed, archive back, checksums compared — plus retention, a staged restore that must leave the live tree alone, and a truncated archive that verification must reject. |
 | `test_harden.py` | The audit is read-only and never prompts; the dry run touches nothing (verified by stat); and with `--full`, apply/rollback in a container, including the anti-lockout rule that password login stays enabled when no SSH key exists. |
 
 `run.sh` also runs `shellcheck` on every `.sh`, `bash -n` on every `.sh`, `pyflakes` (or a syntax

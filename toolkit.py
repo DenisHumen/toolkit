@@ -835,8 +835,9 @@ def discover(repo=REPO):
     return scripts
 
 
-CATEGORY_ORDER = {"Containers": 10, "Security": 20, "Diagnostics": 30,
-                  "Networking": 35, "Linux": 40, "Proxmox": 60, "General": 70}
+CATEGORY_ORDER = {"Containers": 10, "Security": 20, "Maintenance": 25,
+                  "Diagnostics": 30, "Networking": 35, "Linux": 40,
+                  "Proxmox": 60, "General": 70}
 
 
 # --------------------------------------------------------------------------- #
