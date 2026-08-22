@@ -35,7 +35,8 @@ APP = "toolkit"
 VERSION = "1.0"
 REPO = os.path.dirname(os.path.abspath(__file__))
 
-SKIP_DIRS = {".git", ".github", "assets", "node_modules", "__pycache__", ".venv"}
+SKIP_DIRS = {".git", ".github", "assets", "node_modules", "__pycache__", ".venv",
+             "tests"}
 SCRIPT_EXT = {".sh", ".py"}
 
 

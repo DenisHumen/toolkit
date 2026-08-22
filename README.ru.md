@@ -12,6 +12,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/DenisHumen/toolkit/actions/workflows/ci.yml"><img src="https://github.com/DenisHumen/toolkit/actions/workflows/ci.yml/badge.svg" alt="tests"></a>
   <img src="https://img.shields.io/badge/Shell-Bash-4EAA25?logo=gnubash&logoColor=white" alt="Bash">
   <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Proxmox-1793D1?logo=linux&logoColor=white" alt="Платформа">
   <img src="https://img.shields.io/badge/%D0%A1%D1%82%D0%B0%D1%82%D1%83%D1%81-%D0%90%D0%BA%D1%82%D0%B8%D0%B2%D0%BD%D0%BE%20%D0%BF%D0%BE%D0%BF%D0%BE%D0%BB%D0%BD%D1%8F%D0%B5%D1%82%D1%81%D1%8F-2ea44f" alt="Статус">
@@ -99,6 +100,24 @@ chmod +x toolkit.sh
 
 Самому лаунчеру не нужно ничего, кроме Python 3 (есть в каждом массовом дистрибутиве), а любой скрипт
 по-прежнему запускается сам по себе — это слой удобства, а не зависимость.
+
+---
+
+### Как это поддерживается в рабочем состоянии
+
+```bash
+./tests/run.sh              # статические проверки + все быстрые тесты
+./tests/run.sh --full       # плюс контейнеры и живой захват
+```
+
+Бо́льшая часть репозитория интерактивна, а интерактивный код ломается только на **настоящем**
+терминале, поэтому набор тестов запускает каждую программу на псевдотерминале и шлёт ей реальные
+коды клавиш — включая вторую кодировку стрелок, которую используют некоторые терминалы, и две
+последовательности в одном чтении, как при удержании клавиши. Кроме того, прогоняется `shellcheck`
+по всем скриптам, проверяется, что у каждого есть метаданные для лаунчера, синтетический захват с
+двумя провайдерами прогоняется через анализ netwatch (переключения должны находиться), а
+`harden.sh` применяется и откатывается внутри одноразового контейнера. Подробнее —
+[`tests/README.md`](tests/README.md).
 
 ---
 
@@ -477,6 +496,10 @@ toolkit/
 │       └── README.md
 ├── proxmox/
 │   └── proxmox-wipe.sh
+├── tests/           # набор тестов на псевдотерминале: ./tests/run.sh
+│   ├── run.sh
+│   ├── lib.py
+│   └── test_*.py
 ├── README.md        # English
 └── README.ru.md     # Русский (этот файл)
 ```

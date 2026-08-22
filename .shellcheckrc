@@ -1,0 +1,3 @@
+# Scripts read /etc/os-release at run time; shellcheck cannot follow a file
+# that only exists on the target machine, and every use is already guarded.
+disable=SC1091

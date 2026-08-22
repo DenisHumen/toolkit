@@ -60,7 +60,7 @@ log()  { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
 warn() { echo "[$(date +%H:%M:%S)] WARN: $*" | tee -a "$LOG" >&2; }
 die()  { echo "[$(date +%H:%M:%S)] ERROR: $*" | tee -a "$LOG" >&2; exit 1; }
 run()  { if [ "$DRY_RUN" -eq 1 ]; then echo "    DRY: $*" | tee -a "$LOG";
-         else log "RUN: $*"; eval "$@"; fi; }
+         else log "RUN: $*"; eval "$*"; fi; }
 trap 'echo; warn "Interrupted by user."; exit 130' INT
 
 [ "$(id -u)" -eq 0 ] || die "Must run as root."

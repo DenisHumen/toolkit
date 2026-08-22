@@ -12,6 +12,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/DenisHumen/toolkit/actions/workflows/ci.yml"><img src="https://github.com/DenisHumen/toolkit/actions/workflows/ci.yml/badge.svg" alt="tests"></a>
   <img src="https://img.shields.io/badge/Shell-Bash-4EAA25?logo=gnubash&logoColor=white" alt="Bash">
   <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Proxmox-1793D1?logo=linux&logoColor=white" alt="Platform">
   <img src="https://img.shields.io/badge/Status-Actively%20growing-2ea44f" alt="Status">
@@ -96,6 +97,23 @@ described from its own header comment. To control how it is presented, add `# to
 
 The launcher needs nothing but Python 3 (present on every mainstream distro), and every script here
 still runs standalone — it is a convenience layer, not a dependency.
+
+---
+
+### How this is kept working
+
+```bash
+./tests/run.sh              # static checks + every fast test
+./tests/run.sh --full       # also containers and a live capture
+```
+
+Most of this repository is interactive, and interactive code only breaks on a **real** terminal, so
+the suite drives each program on a pseudo-terminal and types actual key codes at it — including the
+second arrow-key encoding some terminals use, and two sequences in one read, which is what a
+held-down key produces. It also runs `shellcheck` over every script, checks that each one carries
+the metadata the launcher reads, replays a synthesised dual-provider capture through netwatch's
+analysis to confirm it still finds the failovers, and applies `harden.sh` inside a throwaway
+container to prove the rollback really rolls back. See [`tests/README.md`](tests/README.md).
 
 ---
 
@@ -467,6 +485,10 @@ toolkit/
 │       └── README.md
 ├── proxmox/
 │   └── proxmox-wipe.sh
+├── tests/           # pty-driven suite: ./tests/run.sh
+│   ├── run.sh
+│   ├── lib.py
+│   └── test_*.py
 ├── README.md        # English (this file)
 └── README.ru.md     # Русский
 ```

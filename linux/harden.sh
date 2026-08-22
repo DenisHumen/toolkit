@@ -181,7 +181,7 @@ SSHD_DROPIN="/etc/ssh/sshd_config.d/99-harden.conf"
 sshd_effective() {   # the value sshd actually uses, includes and all
     local key="$1" val=""
     if [ -n "$SSHD_BIN" ]; then
-        val="$($SUDO_MAYBE "$SSHD_BIN" -T 2>/dev/null | awk -v k="$(echo "$key" | tr 'A-Z' 'a-z')" \
+        val="$($SUDO_MAYBE "$SSHD_BIN" -T 2>/dev/null | awk -v k="$(echo "$key" | tr '[:upper:]' '[:lower:]')" \
               '$1 == k {print $2; exit}')"
     fi
     if [ -z "$val" ] && [ -r "$SSHD_CONFIG" ]; then
@@ -286,10 +286,12 @@ audit_ssh() {
     fi
 
     v="$(sshd_effective PermitEmptyPasswords)"
-    [ "${v:-no}" = "no" ] \
-        && record PASS "$sec" "Empty passwords" "rejected" "" \
-        || record FAIL "$sec" "Empty passwords" "PermitEmptyPasswords=yes" \
-                  "--apply sets it to no"
+    if [ "${v:-no}" = "no" ]; then
+        record PASS "$sec" "Empty passwords" "rejected" ""
+    else
+        record FAIL "$sec" "Empty passwords" "PermitEmptyPasswords=yes" \
+            "--apply sets it to no"
+    fi
 
     v="$(sshd_effective MaxAuthTries)"
     if [ -n "$v" ] && [ "$v" -le 4 ] 2>/dev/null; then
@@ -301,10 +303,12 @@ audit_ssh() {
     fi
 
     v="$(sshd_effective X11Forwarding)"
-    [ "${v:-no}" = "no" ] \
-        && record PASS "$sec" "X11 forwarding" "disabled" "" \
-        || record WARN "$sec" "X11 forwarding" "enabled but rarely needed on a server" \
-                  "--apply disables it"
+    if [ "${v:-no}" = "no" ]; then
+        record PASS "$sec" "X11 forwarding" "disabled" ""
+    else
+        record WARN "$sec" "X11 forwarding" "enabled but rarely needed on a server" \
+            "--apply disables it"
+    fi
 
     v="$(sshd_effective LoginGraceTime)"
     if [ -n "$v" ] && [ "$v" -le 60 ] 2>/dev/null && [ "$v" -gt 0 ] 2>/dev/null; then
@@ -318,11 +322,13 @@ audit_ssh() {
     record INFO "$sec" "Listening port" "sshd is configured on port $port" ""
 
     v="$(sshd_effective AllowUsers)$(sshd_effective AllowGroups)"
-    [ -n "$v" ] \
-        && record PASS "$sec" "Login allow-list" "restricted to: $v" "" \
-        || record INFO "$sec" "Login allow-list" \
-                  "any account with a shell may log in" \
-                  "use --allow-user <name> to restrict it"
+    if [ -n "$v" ]; then
+        record PASS "$sec" "Login allow-list" "restricted to: $v" ""
+    else
+        record INFO "$sec" "Login allow-list" \
+            "any account with a shell may log in" \
+            "use --allow-user <name> to restrict it"
+    fi
 }
 
 audit_firewall() {
@@ -469,18 +475,22 @@ audit_accounts() {
     local sec="Accounts" n
     if [ -r /etc/shadow ]; then
         n="$(awk -F: '($2 == "") {print $1}' /etc/shadow 2>/dev/null | wc -l)"
-        [ "${n:-0}" -eq 0 ] \
-            && record PASS "$sec" "Empty passwords" "no account can log in without one" "" \
-            || record FAIL "$sec" "Empty passwords" "$n account(s) have an empty password" \
-                      "lock them: passwd -l <user>"
+        if [ "${n:-0}" -eq 0 ]; then
+            record PASS "$sec" "Empty passwords" "no account can log in without one" ""
+        else
+            record FAIL "$sec" "Empty passwords" "$n account(s) have an empty password" \
+                "lock them: passwd -l <user>"
+        fi
     else
         record INFO "$sec" "Empty passwords" "/etc/shadow not readable — run as root to check" ""
     fi
     n="$(awk -F: '($3 == 0) {print $1}' /etc/passwd 2>/dev/null | wc -l)"
-    [ "${n:-1}" -le 1 ] \
-        && record PASS "$sec" "UID 0 accounts" "only root has uid 0" "" \
-        || record FAIL "$sec" "UID 0 accounts" "$n accounts share uid 0" \
-                  "give the extra accounts their own uid"
+    if [ "${n:-1}" -le 1 ]; then
+        record PASS "$sec" "UID 0 accounts" "only root has uid 0" ""
+    else
+        record FAIL "$sec" "UID 0 accounts" "$n accounts share uid 0" \
+            "give the extra accounts their own uid"
+    fi
     n="$(admin_users | wc -l)"
     record INFO "$sec" "Login accounts" "$n account(s) with an interactive shell" ""
 }
@@ -522,7 +532,7 @@ run_audit() {
 }
 
 print_audit() {
-    local width=76 section="" last=""
+    local width=76 last=""
     printf '\n'
     printf '%s%s harden %s — security audit %s\n' "$C_B" "$C_M" "$VERSION" "$C_0"
     printf '%s %s · kernel %s · %s%s\n' "$C_G" "${OS_NAME:-unknown}" "$(uname -r)" "$(uname -m)" "$C_0"
@@ -578,6 +588,7 @@ write_report() {
             esac
             printf '| %s | %s | %s | %s | %s |\n' "$icon" "$sec" "$title" "$detail" "${fix:-—}"
         done <"$CHECKS_FILE"
+        # shellcheck disable=SC2016  # the backticks are Markdown, not a subshell
         printf '\nRun `harden.sh --apply --dry-run` to see exactly what would change.\n'
     } >"$REPORT_FILE" && ok "Report written to $REPORT_FILE"
 }
@@ -614,7 +625,10 @@ apply_ssh() {
     [ -n "$SSHD_BIN" ] || { info "sshd not installed — skipping the SSH section"; return 0; }
     info "SSH"
     local baseline_err=""
-    if ! baseline_err="$(priv_capture "$SSHD_BIN" -t)"; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '%s   would verify the current config first:%s %s -t\n' \
+            "$C_D" "$C_0" "$SSHD_BIN"
+    elif ! baseline_err="$(priv_capture "$SSHD_BIN" -t)"; then
         warn "sshd cannot validate its current configuration:"
         warn "    ${baseline_err:-unknown error}"
         warn "Skipping the SSH section — this script only edits a config it can verify."
@@ -692,9 +706,11 @@ EOF
         run_priv systemctl reload "$unit" 2>/dev/null || run_priv systemctl reload sshd 2>/dev/null \
             || warn "Could not reload sshd — apply it yourself: systemctl reload $unit"
         ok "SSH hardened (config validated, service reloaded, sessions kept)"
-        [ "$disable_passwords" = "yes" ] \
-            && ok "Password logins disabled — key for '$keyuser' is now the only way in" \
-            || warn "Password logins still enabled (no key found)"
+        if [ "$disable_passwords" = "yes" ]; then
+            ok "Password logins disabled — key for '$keyuser' is now the only way in"
+        else
+            warn "Password logins still enabled (no key found)"
+        fi
     fi
 }
 
@@ -820,8 +836,10 @@ run_apply() {
 
 run_rollback() {
     [ -d "$BACKUP_ROOT" ] || die "No backups found in $BACKUP_ROOT"
-    local latest
-    latest="$(ls -1d "$BACKUP_ROOT"/*/ 2>/dev/null | sort | tail -1)"
+    local latest="" candidate
+    for candidate in "$BACKUP_ROOT"/*/; do
+        [ -d "$candidate" ] && latest="$candidate"
+    done
     [ -n "$latest" ] || die "No backups found in $BACKUP_ROOT"
     latest="${latest%/}"
     info "Restoring from $latest"

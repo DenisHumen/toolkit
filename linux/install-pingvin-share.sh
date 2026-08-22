@@ -131,7 +131,7 @@ run() {
         printf '    DRY: %s\n' "$*"
     else
         info "run: $*"
-        eval "$@"
+        eval "$*"
     fi
 }
 

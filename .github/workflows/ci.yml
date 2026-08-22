@@ -1,0 +1,62 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  static:
+    name: static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck and pyflakes
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          python3 -m pip install --quiet pyflakes
+      - name: shellcheck, syntax, metadata
+        run: ./tests/run.sh --static
+
+  tests:
+    name: behaviour tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck and pyflakes
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          python3 -m pip install --quiet pyflakes
+      # The full run drives real terminals, builds throwaway containers and takes
+      # a live network capture — all of which the runner can do.
+      - name: Run the suite
+        run: ./tests/run.sh --full
+
+  distros:
+    name: launcher on ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [debian:12, ubuntu:24.04, fedora:40]
+    steps:
+      - uses: actions/checkout@v4
+      # The launcher has to survive a bare system: it is the first thing a new
+      # server runs, before anything else is installed.
+      - name: Discover and check every script
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" ${{ matrix.image }} sh -c '
+            if command -v apt-get >/dev/null 2>&1; then
+              apt-get -qq update >/dev/null 2>&1
+              DEBIAN_FRONTEND=noninteractive apt-get -qq install -y python3 >/dev/null 2>&1
+            else
+              (dnf -y -q install python3 >/dev/null 2>&1 || true)
+            fi
+            cp -r /repo /work && cd /work
+            bash toolkit.sh --list
+            bash toolkit.sh --check
+            bash linux/harden.sh --audit
+          '
