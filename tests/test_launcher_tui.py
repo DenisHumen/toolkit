@@ -37,6 +37,7 @@ def main():
         t.send("ss3_down")
         s.check("application-mode arrows work too", t.selection() == second)
 
+        t.mark()
         t.send("enter")
         detail = t.screen(1.2)
         s.check("Enter opens the summary",
@@ -55,9 +56,11 @@ def main():
         t.send("esc")
         t.read(0.6)
 
+        t.mark()
         t.send("esc")
         s.check("Esc returns to the browser", t.expect("system check", 8))
 
+        t.mark()
         t.send("s")
         info = t.screen(1.2)
         s.check("the system screen opens",
@@ -89,6 +92,7 @@ def main():
         s.check("the filter narrows the list",
                 "harden" in filtered.lower() and "Proxmox" not in filtered)
         s.check("the filter is shown in the header", "filter:" in filtered)
+        t.mark()
         t.send("esc")
         s.check("Esc clears the filter", t.expect("PROXMOX", 8))
 

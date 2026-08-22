@@ -60,3 +60,11 @@ sys.exit(s.finish())
 output to whichever read happened to swallow it. `selection()` returns the row the TUI is
 highlighting. Anything slow, networked or destructive belongs behind
 `os.environ.get("TOOLKIT_TEST_FULL") == "1"`.
+
+**Call `t.mark()` before the key you are about to test.** A TUI repaints the same screen several
+times a second, so whatever was on screen a moment ago is still in the buffer; without a mark, an
+`expect()` happily matches an *old* frame and the check passes without the program having done
+anything. That is not hypothetical — an early version of `test_netwatch_tui.py` asserted that
+setting the duration to `5m` worked by looking for `5 m 0 s`, which matched the **`15 m 0 s`**
+already on screen as the speed-test interval. The check passed, the edit never happened, and the
+next keystroke went into a prompt that was still open.

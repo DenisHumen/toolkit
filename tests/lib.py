@@ -154,6 +154,18 @@ class Term:
                 return False
             self.read(poll)
 
+    def mark(self, settle=0.15):
+        """Ignore everything received so far; the next expect() starts here.
+
+        A TUI repaints the same screen many times a second, so a needle that was
+        on screen a moment ago is still sitting in the buffer. Without this, an
+        expect() can match an *old* frame and report success before the program
+        has done anything — which is how a test comes to pass vacuously.
+        """
+        self.read(settle)
+        self._cursor = len(self.text)
+        return self
+
     def screen(self, settle=0.8):
         """Read for a moment, then return the plain text of what arrived."""
         return ANSI.sub("", self.raw(settle))

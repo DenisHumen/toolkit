@@ -43,20 +43,29 @@ def main():
         s.check("a repeated key is not swallowed", t.selection() == first,
                 "both arrows in a single read must register")
 
+        t.mark()
         t.keys("down", "down")            # -> Settings
         t.send("enter")
-        settings = t.screen(1.2)
-        s.check("Settings opens", "How long to monitor" in settings)
-        s.check("Settings shows current values", "Public-IP" in settings)
+        s.check("Settings opens", t.expect("keep these settings", 10))
+        settings = t.screen(0.8)
+        s.check("Settings shows current values",
+                "How long to monitor" in settings and "Public-IP" in settings)
 
+        t.mark()
         t.send("enter")
         s.check("editing a field prompts", t.expect("How long to monitor", 8))
-        t.type("5m")
-        s.check("the new value is applied", t.expect("5 m 0 s", 8))
+        t.mark()
+        # 7 minutes: no other default formats to a string that contains it, so a
+        # match cannot come from a frame painted before the edit.
+        t.type("7m")
+        s.check("the new value is applied", t.expect("7 m 0 s", 8))
         s.check("survives leaving raw mode for the prompt", t.alive())
+        s.check("the settings list comes back", t.expect("keep these settings", 8))
 
+        t.mark()
         t.send("esc")
-        s.check("Esc returns to the main menu", t.expect("Main menu", 8))
+        s.check("Esc returns to the main menu", t.expect("Main menu", 10))
+        s.check("the edited value stuck", t.expect("7 m 0 s", 8))
 
         t.send("q")
         s.check("q quits", t.wait(15))

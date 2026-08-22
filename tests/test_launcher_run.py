@@ -68,6 +68,7 @@ def main():
         t.keys("down", "down")
         s.check("reached the hardening entry", "Server hardening" in t.screen())
 
+        t.mark()
         t.send("enter")
         summary = t.screen(1.2)
         s.check("the summary names the command", "harden.sh --audit" in summary)
@@ -80,6 +81,7 @@ def main():
                 t.expect("finished successfully", 60))
         s.check("and waits before returning", t.expect("Press Enter to return", 20))
 
+        t.mark()
         t.send("enter")
         s.check("control returns to the browser", t.expect("system check", 20))
         s.check("still alive afterwards", t.alive())
