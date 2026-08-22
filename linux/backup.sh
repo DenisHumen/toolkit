@@ -146,18 +146,51 @@ done
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-IS_ROOT=0; SUDO=""
-if [ "$(id -u)" -eq 0 ]; then
-    IS_ROOT=1
-elif have sudo; then
-    SUDO="sudo"
-fi
+IS_ROOT=0
+[ "$(id -u)" -eq 0 ] && IS_ROOT=1
+ELEVATE=0          # set by need_root(); until then nothing runs through sudo
+
 run() {
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '%s   would run:%s %s\n' "$C_D" "$C_0" "$*"
         return 0
     fi
-    if [ "$IS_ROOT" -eq 1 ]; then "$@"; else $SUDO "$@"; fi
+    if [ "$ELEVATE" -eq 1 ]; then sudo "$@"; else "$@"; fi
+}
+
+writable_dir() {   # is this path, or the nearest parent that exists, writable?
+    local d="$1"
+    while [ ! -e "$d" ] && [ "$d" != "/" ] && [ "$d" != "." ]; do
+        d="$(dirname "$d")"
+    done
+    [ -w "$d" ]
+}
+
+# Work out whether this job actually needs root and, if it does, get the
+# credential once — visibly, before any real work starts. A password prompt
+# that appears halfway through an archive is a hang waiting to happen.
+need_root() {
+    [ "$IS_ROOT" -eq 1 ] && return 0
+    [ "$DRY_RUN" -eq 1 ] && return 0
+    local why="" p
+    writable_dir "$DEST" || why="cannot write to $DEST"
+    for p in "$@"; do
+        [ -n "$why" ] && break
+        if [ ! -r "$p" ] || { [ -d "$p" ] && [ ! -x "$p" ]; }; then
+            why="cannot read $p"
+        fi
+    done
+    [ -n "$why" ] || return 0
+
+    have sudo || die "$why — and sudo is not available. Re-run as root."
+    if sudo -n true 2>/dev/null; then
+        ELEVATE=1
+        return 0
+    fi
+    [ -t 0 ] || die "$why — re-run with sudo (no terminal here to ask for a password)."
+    info "$why — asking sudo for the password once."
+    sudo -v || die "Could not obtain root. Re-run as root, or choose paths you own."
+    ELEVATE=1
 }
 
 human() {   # bytes -> human readable
@@ -209,12 +242,16 @@ collect_auto() {
 
 volume_path() {   # docker volume name -> host path
     have docker || return 1
-    $SUDO docker volume inspect -f '{{ .Mountpoint }}' "$1" 2>/dev/null
+    if [ "$IS_ROOT" -eq 1 ] || docker info >/dev/null 2>&1; then
+        docker volume inspect -f '{{ .Mountpoint }}' "$1" 2>/dev/null
+    elif have sudo && sudo -n true 2>/dev/null; then
+        sudo docker volume inspect -f '{{ .Mountpoint }}' "$1" 2>/dev/null
+    fi
 }
 
 # ---- create --------------------------------------------------------------------- #
 compose_cmd() {
-    if $SUDO docker compose version >/dev/null 2>&1; then
+    if docker compose version >/dev/null 2>&1; then
         printf 'docker compose'
     elif have docker-compose; then
         printf 'docker-compose'
@@ -223,21 +260,38 @@ compose_cmd() {
     fi
 }
 
+STACK_STOPPED=0
+
 stack_stop() {
     [ -n "$STOP_DIR" ] || return 0
+    [ -d "$STOP_DIR" ] || die "--stop: no such directory: $STOP_DIR"
+    compose_file_in "$STOP_DIR" >/dev/null \
+        || die "--stop: no Compose file in $STOP_DIR"
     local cc; cc="$(compose_cmd)" || { warn "docker compose not found — copying hot"; return 0; }
     step "Stopping the stack in $STOP_DIR for a consistent copy"
     # shellcheck disable=SC2086  # cc is "docker compose" or "docker-compose"
     run env -C "$STOP_DIR" $cc stop
+    STACK_STOPPED=1
 }
 
 stack_start() {
-    [ -n "$STOP_DIR" ] || return 0
+    [ "$STACK_STOPPED" -eq 1 ] || return 0
     local cc; cc="$(compose_cmd)" || return 0
     step "Starting the stack in $STOP_DIR again"
+    STACK_STOPPED=0
     # shellcheck disable=SC2086
     run env -C "$STOP_DIR" $cc start
 }
+
+# Ctrl-C in the middle of a large archive must not leave the service down.
+on_exit() {
+    if [ "$STACK_STOPPED" -eq 1 ]; then
+        warn "Interrupted while the stack was stopped — starting it again."
+        stack_start
+    fi
+}
+trap on_exit EXIT
+trap 'warn "Interrupted."; exit 130' INT TERM
 
 do_create() {
     [ "$AUTO" -eq 1 ] && collect_auto
@@ -294,6 +348,7 @@ do_create() {
         case "${reply:-y}" in [nN]*) die "Cancelled." ;; esac
     fi
 
+    need_root "${existing[@]}"
     run mkdir -p "$DEST"
 
     local tar_args=(--warning=no-file-changed --warning=no-file-ignored -cf -)
@@ -315,13 +370,17 @@ do_create() {
         step "Archiving"
         # tar exits 1 for "file changed as we read it", which is expected on a
         # live system and not a reason to throw the archive away; 2 is fatal.
-        if [ "$IS_ROOT" -eq 1 ]; then
-            tar "${tar_args[@]}" 2>/dev/null | $COMP_CMD > "$archive"
+        if [ "$ELEVATE" -eq 1 ]; then
+            sudo tar "${tar_args[@]}" 2>/dev/null | $COMP_CMD | sudo tee "$archive" >/dev/null
         else
-            $SUDO tar "${tar_args[@]}" 2>/dev/null | $COMP_CMD | $SUDO tee "$archive" >/dev/null
+            tar "${tar_args[@]}" 2>/dev/null | $COMP_CMD > "$archive"
         fi
         local rc=${PIPESTATUS[0]}
-        [ "$rc" -le 1 ] || { stack_start; die "tar failed with status $rc — archive discarded."; }
+        if [ "$rc" -gt 1 ]; then
+            stack_start
+            run rm -f "$archive"
+            die "tar failed with status $rc — archive discarded. If some paths need root, re-run with sudo."
+        fi
     fi
     stack_start
     ended="$(date +%s)"
@@ -415,7 +474,7 @@ prune() {
     [ "$KEEP" -gt 0 ] 2>/dev/null || return 0
     local archives=() f
     while IFS= read -r f; do archives+=("$f"); done < <(
-        find "$DEST" -maxdepth 1 -name "*.tar.zst" -o -maxdepth 1 -name "*.tar.gz" \
+        find "$DEST" -maxdepth 1 -type f \( -name '*.tar.zst' -o -name '*.tar.gz' \) \
             2>/dev/null | sort)
     local count=${#archives[@]}
     [ "$count" -gt "$KEEP" ] || return 0
@@ -431,7 +490,8 @@ prune() {
         while IFS= read -r f; do
             info "removing (older than ${KEEP_DAYS}d) $(basename "$f")"
             run rm -f "$f" "${f}.meta" "${f}.sha256"
-        done < <(find "$DEST" -maxdepth 1 \( -name '*.tar.zst' -o -name '*.tar.gz' \) \
+        done < <(find "$DEST" -maxdepth 1 -type f \
+                     \( -name '*.tar.zst' -o -name '*.tar.gz' \) \
                      -mtime "+$KEEP_DAYS" 2>/dev/null)
     fi
 }
@@ -467,7 +527,7 @@ do_list() {
             printf '  %s%s%s' "$C_G" "$(awk -F= '/^consistent=/{print $2}' "${f}.meta")" "$C_0"
         fi
         printf '\n'
-    done < <(find "$DEST" -maxdepth 1 \( -name '*.tar.zst' -o -name '*.tar.gz' \) \
+    done < <(find "$DEST" -maxdepth 1 -type f \( -name '*.tar.zst' -o -name '*.tar.gz' \) \
                  2>/dev/null | sort -r)
     [ "$found" -gt 0 ] || warn "no archives yet — run without --list to make one"
     printf '\n'
@@ -529,6 +589,7 @@ do_restore() {
         return 0
     fi
 
+    need_root
     run mkdir -p "$target"
     step "Extracting"
     # Only an in-place restore may write to the absolute paths inside the
@@ -536,10 +597,10 @@ do_restore() {
     # --to, or "staging" would mean "overwrite the live system".
     local extract_args=(-xf - -C "$target")
     [ "$IN_PLACE" -eq 1 ] && extract_args+=(--absolute-names)
-    if [ "$IS_ROOT" -eq 1 ]; then
-        $DECOMP_CMD <"$archive" | tar "${extract_args[@]}" 2>/dev/null
+    if [ "$ELEVATE" -eq 1 ]; then
+        $DECOMP_CMD <"$archive" | sudo tar "${extract_args[@]}" 2>/dev/null
     else
-        $DECOMP_CMD <"$archive" | $SUDO tar "${extract_args[@]}" 2>/dev/null
+        $DECOMP_CMD <"$archive" | tar "${extract_args[@]}" 2>/dev/null
     fi
     local rc=$?
     [ "$rc" -le 1 ] || die "Extraction failed with status $rc."
@@ -553,6 +614,7 @@ TIMER_UNIT="/etc/systemd/system/toolkit-backup.timer"
 
 do_timer() {
     have systemctl || die "systemd is not available on this machine."
+    writable_dir /etc/systemd/system || need_root
     local self; self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
     local args="--yes --keep $KEEP --dest $DEST"
     [ "$AUTO" -eq 1 ] && args="$args --auto"
@@ -602,12 +664,13 @@ EOF
     run systemctl daemon-reload
     run systemctl enable --now toolkit-backup.timer
     ok "Timer installed — running $TIMER_WHEN"
-    info "Next run: $($SUDO systemctl list-timers toolkit-backup.timer --no-pager 2>/dev/null | sed -n 2p)"
+    info "Next run: $(run systemctl list-timers toolkit-backup.timer --no-pager 2>/dev/null | sed -n 2p)"
     info "Run it now with: systemctl start toolkit-backup.service"
 }
 
 do_untimer() {
     have systemctl || die "systemd is not available on this machine."
+    writable_dir /etc/systemd/system || need_root
     run systemctl disable --now toolkit-backup.timer 2>/dev/null
     run rm -f "$TIMER_UNIT" "$SERVICE_UNIT"
     run systemctl daemon-reload

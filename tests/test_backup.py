@@ -137,6 +137,43 @@ def main():
     s.check("verifying a missing archive fails clearly",
             rc != 0 and "No such archive" in out)
 
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, out = sh(["bash", BACKUP, "--path", "/etc/hostname",
+                      "--dest", os.path.join(tmp, "d"), "--stop", "/no-such-project",
+                      "--yes"], timeout=60)
+        s.check("--stop checks the project exists before stopping anything",
+                rc != 0 and "no such directory" in out, out[-200:])
+
+    # Everything that needs root must say so and stop, not sit on a password
+    # prompt: this is the failure mode that hangs a cron job forever.
+    if os.geteuid() != 0:
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = sh(["bash", BACKUP, "--path", "/etc/shadow",
+                          "--dest", os.path.join(tmp, "d"), "--yes"], timeout=60)
+            s.check("an unreadable source fails fast with an explanation",
+                    rc != 0 and "re-run with sudo" in out, out[-200:])
+            rc, out = sh(["bash", BACKUP, "--path", "/etc/hostname",
+                          "--dest", "/root/nope", "--yes"], timeout=60)
+            s.check("an unwritable destination fails fast too",
+                    rc != 0 and "cannot write" in out, out[-200:])
+    else:
+        s.skip("privilege escalation messages", "running as root")
+
+    # A backup of files the user already owns must never ask for a password.
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "mine")
+        os.makedirs(src)
+        with open(os.path.join(src, "f.txt"), "w") as fh:
+            fh.write("data\n")
+        dest = os.path.join(tmp, "archives")
+        rc, out = sh(["bash", BACKUP, "--path", src, "--dest", dest,
+                      "--name", "own", "--yes"], timeout=120)
+        s.check("backing up your own files needs no privileges", rc == 0, out[-300:])
+        s.check("and never mentions sudo", "sudo" not in out.lower(), out[-200:])
+        made = [f for f in os.listdir(dest) if f.startswith("own-")
+                and not f.endswith((".meta", ".sha256"))] if os.path.isdir(dest) else []
+        s.check("the archive lands where it was asked to", len(made) == 1, str(made))
+
     if not FULL:
         s.skip("backup/restore round trip", "set TOOLKIT_TEST_FULL=1")
         return s.finish()
