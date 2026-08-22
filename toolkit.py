@@ -1986,7 +1986,7 @@ def find_script(scripts, needle):
     return partial[0] if len(partial) == 1 else None
 
 
-def print_update(updater):
+def print_update(updater, offer=True):
     print()
     if updater.status == "behind":
         count = updater.ahead
@@ -2000,10 +2000,10 @@ def print_update(updater):
                   f"   {GREY}{c['when']}{C0}")
         possible, blocker = updater.can_update()
         print()
-        if possible:
-            print(f" {GREY}update with:{C0} ./toolkit.sh --update")
-        else:
+        if not possible:
             print(f" {YELLOW}{GLYPH['warn']}{C0} {blocker}")
+        elif offer:
+            print(f" {GREY}update with:{C0} ./toolkit.sh --update")
     elif updater.status == "current":
         print(f" {GREEN}{GLYPH['ok']} Up to date{C0} — "
               f"{updater.slug}@{updater.branch} {GREY}{updater.local_sha[:7]}{C0}")
@@ -2048,7 +2048,7 @@ def main(argv):
         if not possible:
             print_update(updater)
             die(blocker)
-        print_update(updater)
+        print_update(updater, offer=False)
         return updater.pull()
 
     system = System()
