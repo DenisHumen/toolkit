@@ -106,6 +106,21 @@ else
     fi
 fi
 
+# A script that is not executable in the index is one `./script.sh` away from a
+# "Permission denied" on someone else's clone — chmod on a Windows checkout does
+# not set it, so ask git rather than the filesystem.
+if command -v git >/dev/null 2>&1 && [ -d .git ]; then
+    not_exec="$(git ls-files -s -- '*.sh' | awk '$1 != "100755" {print $4}')"
+    if [ -z "$not_exec" ]; then
+        printf '  %spass%s  every .sh is executable in git\n' "$G" "$Z"
+        PASSED+=("exec bits")
+    else
+        printf '  %sFAIL%s  not executable in git:\n%s\n' "$R" "$Z" "$not_exec"
+        printf '  %sfix: git update-index --chmod=+x <file>%s\n' "$D" "$Z"
+        FAILED+=("exec bits")
+    fi
+fi
+
 # Every script must announce itself to the launcher.
 missing_meta="$(grep -RL '^# toolkit-name:' --include='*.sh' \
     linux proxmox 2>/dev/null | grep -v '/tests/' || true)"
