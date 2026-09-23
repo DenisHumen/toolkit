@@ -82,3 +82,7 @@ with its own cbreak mode still on: `input()` got the keys, but nothing appeared 
 Backspace was stored as `\x7f`. Every test that typed a value and checked the result passed, while
 people saw a prompt that "would not take a y". `test_terminal_modes.py` types without Enter and
 expects the echo, and sends Enter as `\r` — what a real terminal sends — never `\n`.
+
+**Keep the host out of the verdict.** The launcher's system check looks at the real machine (open
+ports, installed commands); a test that evaluates a synthetic script must stub those, or it passes
+on CI and fails on any laptop with something listening on port 80.

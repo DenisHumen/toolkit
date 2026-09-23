@@ -80,6 +80,9 @@ echo nuke
 """
 
 
+REAL_PORT_IN_USE = tk.port_in_use
+
+
 class FakeSystem:
     """A machine with known properties, so verdicts are predictable.
 
@@ -199,6 +202,9 @@ def main():
             s.check("keeps the confirmation word", nuke.get("confirm") == "DO-IT")
 
         # ---- the system check ------------------------------------------- #
+        # Whether port 80 is free on the machine running the tests must not decide
+        # these verdicts: a busy port is a warning and would take the tag.
+        tk.port_in_use = lambda port: False
         if alpha:
             tk.evaluate(alpha, FakeSystem(family="debian"), deep=True)
             s.check("a supported machine is ready",
@@ -260,6 +266,16 @@ def main():
                     alpha.verdict == "blocked")
             s.check("and is tagged offline", alpha.tag == "offline", alpha.tag)
 
+            # ---- several reasons at once: the most serious one is shown ------ #
+            tk.port_in_use = lambda port: True
+            tk.evaluate(alpha, FakeSystem(sudo="password"), deep=False)
+            s.check("a busy port outranks the root hint",
+                    alpha.tag == "port 80 busy", alpha.tag)
+            tk.evaluate(alpha, FakeSystem(internet=False), deep=False)
+            s.check("being offline outranks a busy port, although it is checked later",
+                    alpha.tag == "offline", alpha.tag)
+            tk.port_in_use = lambda port: False
+
         if nuke:
             tk.evaluate(nuke, FakeSystem(), deep=False)
             s.check("a missing required command blocks it", nuke.verdict == "blocked")
@@ -271,6 +287,12 @@ def main():
             s.check("and suggests how to install it",
                     any("apt install" in step for step in nuke.remedy),
                     str(nuke.remedy))
+            # "limited" (optional root missing) is found first but only a warning;
+            # the missing command is what actually stops it.
+            nuke.meta["root"] = "optional"
+            tk.evaluate(nuke, FakeSystem(sudo="none"), deep=False)
+            s.check("a missing command outranks 'limited'",
+                    nuke.tag.startswith("no "), nuke.tag)
 
         # ---- the real repository still parses ---------------------------- #
         real = tk.discover(REPO)
@@ -287,6 +309,7 @@ def main():
                 not any("/tests/" in x.rel or x.rel.startswith("tests/") for x in real),
                 ", ".join(x.rel for x in real if "tests" in x.rel))
     finally:
+        tk.port_in_use = REAL_PORT_IN_USE
         shutil.rmtree(tmp, ignore_errors=True)
     return s.finish()
 

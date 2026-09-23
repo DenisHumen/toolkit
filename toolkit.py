@@ -1238,6 +1238,9 @@ def package_hint(system, commands):
     return f"$ {prefix}{manager} {' '.join(commands)}"
 
 
+NEEDS_ATTENTION, BLOCKS = 1, 2
+
+
 def evaluate(script, system, deep=True):
     """Fill script.checks / script.verdict with the result of the system check."""
     checks = []
@@ -1246,11 +1249,17 @@ def evaluate(script, system, deep=True):
     script.tag = ""
     script.remedy = []
     root_hint = ""          # the weakest tag: true, but rarely the point
+    tag_rank = 0            # BLOCKS beats NEEDS_ATTENTION, whatever order the checks run in
 
-    def tag(text):
-        """First one wins: blockers are set before warnings."""
-        if not script.tag:
-            script.tag = text
+    def tag(text, rank):
+        """The most serious reason wins; among equals, the first one found.
+
+        Order of the checks alone is not enough: "limited" (a warning) is found
+        before "no python3" (a blocker), and would otherwise hide it.
+        """
+        nonlocal tag_rank
+        if rank > tag_rank:
+            script.tag, tag_rank = text, rank
 
     families = [f.lower() for f in script.list_of("os")]
     if families and "any" not in families:
@@ -1264,7 +1273,7 @@ def evaluate(script, system, deep=True):
             checks.append(("bad", f"targets {', '.join(families)} — this is "
                                   f"{system.family}"))
             blockers += 1
-            tag(f"not {families[0]}")
+            tag(f"not {families[0]}", BLOCKS)
             script.remedy = [f"This script only knows how to work on "
                              f"{', '.join(families)}. Run it on one of those, or "
                              f"open it and adapt the package-manager section."]
@@ -1286,7 +1295,7 @@ def evaluate(script, system, deep=True):
             checks.append(("bad", "this script must run as root, and this session "
                                   f"cannot become root: {system.sudo_note}"))
             blockers += 1
-            tag("needs root")
+            tag("needs root", BLOCKS)
             script.remedy = ["Start the launcher as root and it will appear ready:",
                              "$ sudo ./toolkit.sh"] if system.sudo == "password" else [
                 "Log in as root (or as a user allowed to use sudo) and start it again:",
@@ -1299,14 +1308,14 @@ def evaluate(script, system, deep=True):
             checks.append(("warn", "runs without root, but the parts that need it "
                                    "will be skipped or reduced"))
             warnings += 1
-            tag("limited")
+            tag("limited", NEEDS_ATTENTION)
 
     missing = [c for c in script.list_of("needs") if not shutil.which(c)]
     present = [c for c in script.list_of("needs") if shutil.which(c)]
     if missing:
         checks.append(("bad", f"missing required command(s): {', '.join(missing)}"))
         blockers += 1
-        tag(f"no {missing[0]}")
+        tag(f"no {missing[0]}", BLOCKS)
         hint = package_hint(system, missing)
         script.remedy = ["Install what it needs, then press r to re-check:"] + (
             [hint] if hint else [f"install: {', '.join(missing)}"])
@@ -1330,13 +1339,13 @@ def evaluate(script, system, deep=True):
         if port.isdigit() and port_in_use(port):
             checks.append(("warn", f"port {port} is already in use by something else"))
             warnings += 1
-            tag(f"port {port} busy")
+            tag(f"port {port} busy", NEEDS_ATTENTION)
 
     if script.kind == "installer":
         if system.internet is False:
             checks.append(("bad", "no internet connection — packages cannot be downloaded"))
             blockers += 1
-            tag("offline")
+            tag("offline", BLOCKS)
             script.remedy = ["Connect this machine to the internet, then press r in "
                              "the launcher to check again.",
                              "The netwatch entry can tell you what is wrong with the "
@@ -1353,7 +1362,7 @@ def evaluate(script, system, deep=True):
     if missing_required:
         checks.append(("warn", f"set {', '.join(missing_required)} in Options before running"))
         warnings += 1
-        tag(f"needs {missing_required[0]}")
+        tag(f"needs {missing_required[0]}", NEEDS_ATTENTION)
 
     script.checks = checks
     script.verdict = "blocked" if blockers else ("attention" if warnings else "ready")
