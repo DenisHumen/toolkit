@@ -28,6 +28,7 @@ file into the repo is enough to make it appear here.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -355,6 +356,46 @@ class KeyReader:
             if seq in (b"F", b"4~"):
                 return "end"
         return None
+
+
+@contextlib.contextmanager
+def line_mode():
+    """Normal line input for a prompt or a child script, then back to single keys.
+
+    The browser keeps the terminal in cbreak mode (no echo, no line editing) so
+    each key arrives at once. Whatever reads a line inherits that mode unless it
+    is handed back: input() and a script's "[y/N]" still receive the keys, but
+    nothing appears on screen and Backspace does not erase, which looks exactly
+    like typing being impossible.
+    """
+    if os.name == "nt" or not sys.stdin.isatty():
+        yield
+        return
+    import termios
+    fd = sys.stdin.fileno()
+    try:
+        before = termios.tcgetattr(fd)
+    except termios.error:
+        yield
+        return
+    # Start from the user's own settings as they were before the browser took
+    # the terminal, and insist on the line-mode basics in case those were broken.
+    base = KEYS._old if KEYS is not None and KEYS._old is not None else before
+    sane = list(base)
+    sane[6] = list(base[6])
+    sane[0] |= termios.ICRNL
+    sane[3] |= termios.ECHO | termios.ECHOE | termios.ECHOK | termios.ICANON | termios.ISIG
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, sane)
+    except termios.error:
+        pass
+    try:
+        yield
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, before)
+        except termios.error:
+            pass
 
 
 class Screen:
@@ -1510,7 +1551,8 @@ def prompt(label, default=""):
     SCREEN.leave()
     try:
         suffix = f" {GREY}[{default}]{C0}" if default else ""
-        value = input(f"{BLUE}?{C0} {label}{suffix}: ").strip()
+        with line_mode():
+            value = input(f"{BLUE}?{C0} {label}{suffix}: ").strip()
     except (EOFError, KeyboardInterrupt):
         value = ""
     if was:
@@ -1520,7 +1562,8 @@ def prompt(label, default=""):
 
 def pause(message="Press Enter to continue…"):
     try:
-        input(f"\n{GREY}{message}{C0}")
+        with line_mode():
+            input(f"\n{GREY}{message}{C0}")
     except (EOFError, KeyboardInterrupt):
         pass
 
@@ -1803,7 +1846,8 @@ def run_script(script, system, preview=False, extra="", pause_after=True):
     print(f"{BLUE}{rule}{C0}\n", flush=True)
     started = time.monotonic()
     try:
-        rc = subprocess.call(argv, cwd=INVOKE_CWD)
+        with line_mode():
+            rc = subprocess.call(argv, cwd=INVOKE_CWD)
     except KeyboardInterrupt:
         rc = 130
     except FileNotFoundError as e:

@@ -67,6 +67,7 @@ Options
 from __future__ import annotations
 
 import collections
+import contextlib
 import html
 import http.client
 import json
@@ -250,6 +251,51 @@ def clip(s, width):
 
 
 CURSOR_KEYS = {b"A": "up", b"B": "down", b"C": "right", b"D": "left"}
+
+
+@contextlib.contextmanager
+def line_mode():
+    """Make sure a line prompt can be seen and edited while it is read.
+
+    A parent that drives the terminal in cbreak mode (the toolkit launcher did,
+    before it learned to hand the terminal back) leaves echo and line editing
+    off: input() still gets the keys, but nothing appears and Backspace does not
+    erase, so "Start now? (y/n)" looks like it refuses to take a 'y'.
+    """
+    if os.name == "nt" or not sys.stdin.isatty():
+        yield
+        return
+    try:
+        import termios
+        fd = sys.stdin.fileno()
+        before = termios.tcgetattr(fd)
+    except Exception:
+        yield
+        return
+    sane = list(before)
+    sane[6] = list(before[6])
+    sane[0] |= termios.ICRNL
+    sane[3] |= termios.ECHO | termios.ECHOE | termios.ECHOK | termios.ICANON | termios.ISIG
+    changed = sane != before
+    if changed:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, sane)
+        except Exception:
+            changed = False
+    try:
+        yield
+    finally:
+        if changed:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, before)
+            except Exception:
+                pass
+
+
+def read_line(prompt=""):
+    """input() with echo and line editing guaranteed (see line_mode)."""
+    with line_mode():
+        return input(prompt)
 
 
 class KeyReader:
@@ -5451,7 +5497,7 @@ def menu_select(title, items, subtitle="", footer="↑/↓ move · Enter choose 
         for i, (label, hint) in enumerate(items, 1):
             print(f"  {i}. {label}  — {hint}")
         try:
-            raw = input("Choose: ").strip()
+            raw = read_line("Choose: ").strip()
         except EOFError:
             return None
         return int(raw) - 1 if raw.isdigit() and 1 <= int(raw) <= len(items) else None
@@ -5464,7 +5510,7 @@ def menu_select(title, items, subtitle="", footer="↑/↓ move · Enter choose 
                 screen.leave()
                 for i, (label, hint) in enumerate(items, 1):
                     print(f"  {i}. {label}  — {hint}")
-                raw = input("Choose: ").strip()
+                raw = read_line("Choose: ").strip()
                 return int(raw) - 1 if raw.isdigit() and 1 <= int(raw) <= len(items) else None
             while True:
                 screen.paint(_menu_frame(title, subtitle, items, idx, footer))
@@ -5488,7 +5534,7 @@ def menu_select(title, items, subtitle="", footer="↑/↓ move · Enter choose 
 def ask(prompt, default=""):
     suffix = f" {GREY}[{default}]{C0}" if default != "" else ""
     try:
-        raw = input(f"{BLUE}?{C0} {prompt}{suffix}: ").strip()
+        raw = read_line(f"{BLUE}?{C0} {prompt}{suffix}: ").strip()
     except (EOFError, KeyboardInterrupt):
         return default
     return raw or default
@@ -5757,7 +5803,7 @@ def interactive():
             if not ask_bool("Start now?", True):
                 continue
             do_capture_and_report(cfg)
-            input(f"\n{GREY}Press Enter to return to the menu…{C0}")
+            read_line(f"\n{GREY}Press Enter to return to the menu…{C0}")
         elif idx == 1:
             quick = Config()
             quick.duration = 90.0
@@ -5770,15 +5816,15 @@ def interactive():
             quick.plan_mbps = cfg.plan_mbps
             quick.out_dir = cfg.out_dir
             do_capture_and_report(quick)
-            input(f"\n{GREY}Press Enter to return to the menu…{C0}")
+            read_line(f"\n{GREY}Press Enter to return to the menu…{C0}")
         elif idx == 2:
             cfg = settings_menu(cfg)
         elif idx == 3:
             analyze_menu()
-            input(f"\n{GREY}Press Enter to return to the menu…{C0}")
+            read_line(f"\n{GREY}Press Enter to return to the menu…{C0}")
         elif idx == 4:
             print(HELP_TEXT)
-            input(f"\n{GREY}Press Enter to return to the menu…{C0}")
+            read_line(f"\n{GREY}Press Enter to return to the menu…{C0}")
 
 
 # --------------------------------------------------------------------------- #

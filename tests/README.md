@@ -34,6 +34,7 @@ two sequences delivered in a single read, which is what a held-down key actually
 | `test_launcher_tui.py` | Every launcher screen: browser, summary, options, docs pager, system info, help, filter — plus arrow keys, Escape and a clean exit. |
 | `test_launcher_run.py` | `--list`, `--check`, `--run`, unknown names, and the one-click path end to end: select → summary → run → return. |
 | `test_netwatch_tui.py` | netwatch's menu, the arrow-key regression, editing a setting (raw mode → prompt → raw mode), and with `--full` the live dashboard and `q`. |
+| `test_terminal_modes.py` | Typing into a prompt shows up and Backspace erases — for scripts the launcher starts, the launcher's own prompts, netwatch under a parent that left cbreak mode on, and the whole path launcher → netwatch → Settings. Also that the launcher gets its single-key mode back afterwards. |
 | `test_netwatch_analysis.py` | The analysis, fed a synthesised dual-WAN capture with a known answer: four failovers, per-uplink loss and latency, the outages they caused, the verdict, the report and its charts. |
 | `test_backup.py` | A full round trip in a container: real files in, source destroyed, archive back, checksums compared — plus retention, a staged restore that must leave the live tree alone, and a truncated archive that verification must reject. |
 | `test_update.py` | Remote-URL parsing, the cache and the skip rule, the safety checks (dirty tree, diverged history) against a local git fixture including a real fast-forward, the notice and screen inside the launcher, and — in `--full` — the live GitHub check. |
@@ -70,3 +71,14 @@ anything. That is not hypothetical — an early version of `test_netwatch_tui.py
 setting the duration to `5m` worked by looking for `5 m 0 s`, which matched the **`15 m 0 s`**
 already on screen as the speed-test interval. The check passed, the edit never happened, and the
 next keystroke went into a prompt that was still open.
+
+**Wait for text only the next screen has before sending its key.** netwatch's main menu contains
+the word "Settings", so `expect("Settings")` after pressing `3` matched the menu itself; the next
+key went out before the settings screen was listening, arrived in the same read as the `3`, and was
+dropped with the old menu. Look for the settings subtitle, or the `? ` of a prompt, instead.
+
+**Check what the terminal echoes, not only what comes back.** The launcher used to start scripts
+with its own cbreak mode still on: `input()` got the keys, but nothing appeared on screen and
+Backspace was stored as `\x7f`. Every test that typed a value and checked the result passed, while
+people saw a prompt that "would not take a y". `test_terminal_modes.py` types without Enter and
+expects the echo, and sends Enter as `\r` — what a real terminal sends — never `\n`.
