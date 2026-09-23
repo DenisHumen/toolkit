@@ -82,12 +82,13 @@ netwatch-20260821-120000/
 ├── report.md          # the whole analysis, in Markdown
 ├── summary.json       # the same verdict as machine-readable JSON
 ├── netwatch.db        # every raw sample, queryable with plain SQL
-└── charts/            # up to 14 self-contained SVGs, light + dark aware
+└── charts/            # up to 15 self-contained SVGs, light + dark aware
 ```
 
 `report.md` contains, in order: a **stability score** (0–100 with a letter grade) and the findings
 sorted by severity; **availability** with a status-page ribbon and a table of every interruption
-(including whether your own router was still answering); **latency, jitter and loss per hop**;
+(including whether your own router was still answering); **loss that comes back on a schedule**,
+when there is some; **latency, jitter and loss per hop**;
 **uplink / balancer behaviour**; **DNS**; **HTTP/TLS** with a phase breakdown; **throughput and
 bufferbloat**; **path, MTU and reachability**; **local link**; **time-of-day patterns** with an
 hourly heatmap; the **event log**; and the raw-data section with example SQL.
@@ -100,8 +101,33 @@ The verdict compares layers instead of quoting one number:
 - clean ISP edge, loss on **all three public anchors** → their transit or your line;
 - loss on **one anchor only** → that operator, not you;
 - latency fine when idle but exploding under load → **bufferbloat**, not the ISP;
-- outages spaced evenly → something **scheduled** (DHCP lease, PPPoE re-dial, a reboot);
+- loss that keeps landing on the **same moment of a cycle** → something **scheduled** (see below);
 - loss that correlates with the **Wi-Fi signal** → move the access point, not the contract.
+
+### Loss on a schedule
+
+Short bursts of loss barely move the percentages — a line can score A+ while losing a few packets
+at 20–50 s past every ten minutes, and that is exactly the pattern of a scheduled job on a router or
+load balancer (a failover check, a script touching routes or NAT, a DHCP or PPPoE renewal). Each
+burst is harmless for browsing, but if it changes routes or NAT state it resets long-lived
+connections: trading platforms, calls, game sessions, SSH and VPN tunnels.
+
+So every capture is checked for a rhythm. Lost probes to the public anchors are grouped into
+bursts (one long outage counts once), netwatch's own speed tests are left out, and the bursts'
+start times are tested against round periods from 1 minute to 2 hours (Rayleigh test, corrected
+for trying several). A job every P also looks periodic at P/2, P/3 …, so the strongest candidate is
+only a starting point: netwatch climbs to the period at which the bursts keep landing in one slot.
+A phase-versus-time fit then tells a clock-driven job (the slice stays put) from a timer that
+re-arms after each run (the slice drifts).
+
+When a rhythm is found, the report names the period and the slice in router-log terms
+("0:25–0:45 after hh:00, hh:10, hh:20 …"), draws where in the cycle the bursts start, lists every
+burst with its time, and says what else it knows: whether the public-IP probe failed in the same
+slice, whether the gateway, the second hop and the ISP edge kept answering (so where it breaks),
+and whether latency climbed first (a scheduled transfer filling the line) or packets simply
+vanished (a device dropping them). It costs up to 10 points of the score. A rhythm that lines up
+with netwatch's own traceroute, NTP or port checks is reported as such and not held against the
+connection.
 
 ## Options
 

@@ -3161,6 +3161,237 @@ def _q(conn, sql, args=()):
         return []
 
 
+# --------------------------------------------------------------------------- #
+# rhythm — does the trouble come back on a schedule?
+# --------------------------------------------------------------------------- #
+# Round periods only: schedulers, lease timers and health checks use them, and a
+# short list keeps the multiple-testing correction honest.
+RHYTHM_PERIODS = (60, 120, 180, 240, 300, 360, 480, 600, 720, 900, 1200, 1800,
+                  2700, 3600, 7200)
+RHYTHM_GAP = 15           # lost seconds closer together than this are one burst
+RHYTHM_MIN_BURSTS = 6
+
+
+def loss_bursts(seconds, gap=RHYTHM_GAP):
+    """Group sorted lost seconds into bursts: [(first, last, lost_seconds), ...]."""
+    out = []
+    for sec in seconds:
+        if out and sec - out[-1][1] <= gap:
+            out[-1][1] = sec
+            out[-1][2] += 1
+        else:
+            out.append([sec, sec, 1])
+    return [tuple(b) for b in out]
+
+
+def rayleigh(times, period):
+    """How tightly event times cluster at one point of a cycle: (R, p).
+
+    R is 1 when every event lands at the same moment of the cycle and near 0 when
+    they are spread evenly; p is the chance of clustering this tight at random.
+    """
+    n = len(times)
+    if n < 2:
+        return 0.0, 1.0
+    c = s = 0.0
+    for t in times:
+        a = 2 * math.pi * (t % period) / period
+        c += math.cos(a)
+        s += math.sin(a)
+    r = math.hypot(c, s) / n
+    # Zar's approximation: accurate for small n too, where the series expansion
+    # can even go negative (8 perfectly aligned events would come out as p < 0).
+    rn = n * r
+    p = math.exp(math.sqrt(max(0.0, 1 + 4 * n + 4 * (n * n - rn * rn))) - (1 + 2 * n))
+    return r, min(1.0, max(p, 1e-300))
+
+
+def _densest_arc(phases, period):
+    """The stretch of the cycle where bursts are most over-represented:
+    (start, width), start in [0, period).
+
+    A scan statistic: every arc from one burst to another is scored by how
+    unlikely its count would be at the overall rate, so the arc hugs the cluster
+    instead of stretching to swallow the stray bursts around it.
+    """
+    ph = sorted(p % period for p in phases)
+    n = len(ph)
+    if n > 800:                       # keep it quick on a very lossy capture
+        k = math.ceil(n * 0.75)
+        ext = ph + [x + period for x in ph]
+        width, start = min((ext[i + k - 1] - ext[i], ext[i]) for i in range(n))
+        return start % period, width
+    ext = ph + [x + period for x in ph]
+    best = (-1.0, ph[0], 1.0)
+    for i in range(n):
+        for k in range(2, n + 1):
+            width = ext[i + k - 1] - ext[i]
+            if width >= period:
+                break
+            expected = n * (width + 2.0) / period
+            if k <= expected or expected >= n:
+                continue
+            llr = k * math.log(k / expected)
+            if n > k:
+                llr += (n - k) * math.log((n - k) / (n - expected))
+            if llr > best[0]:
+                best = (llr, ext[i] % period, width)
+    return best[1], best[2]
+
+
+def _in_arc(phase, start, width, period, margin=2.0):
+    return (phase - (start - margin)) % period <= width + 2 * margin
+
+
+def _binom_tail(n, k, p):
+    """P(X >= k) for X ~ Binomial(n, p)."""
+    return sum(math.comb(n, i) * p ** i * (1 - p) ** (n - i) for i in range(k, n + 1))
+
+
+def _resolve_harmonics(starts, period, tested):
+    """Climb from a divisor to the job's real period.
+
+    A job every P also looks periodic at P/2, P/3 … — and stray bursts can make
+    a divisor look *more* periodic than P itself. The bursts in the slice tell
+    them apart: under a multiple of the true period they keep landing in the
+    same slot, under a multiple of a divisor they spread over its slots.
+    """
+    while True:
+        a, w = _densest_arc([t % period for t in starts], period)
+        inside = [t for t in starts if _in_arc(t % period, a, w, period)]
+        if len(inside) < RHYTHM_MIN_BURSTS:
+            return period
+        for mult in sorted(q for q in tested if q > period and q % period == 0):
+            k = mult // period
+            slots = collections.Counter(int(((t - a + 2.0) % mult) // period) for t in inside)
+            top = max(slots.values())
+            if k * _binom_tail(len(inside), top, 1.0 / k) < 1e-3:
+                period = mult
+                break
+        else:
+            return period
+
+
+def find_rhythm(seconds, start, end, periods=RHYTHM_PERIODS, min_bursts=RHYTHM_MIN_BURSTS):
+    """Find a period at which loss keeps coming back, if there is one.
+
+    `seconds` are the epoch seconds in which a probe was lost. They are grouped
+    into bursts first, so one long outage counts once rather than as a hundred
+    perfectly aligned events. Each candidate period gets a Rayleigh test on the
+    bursts' start times, with a correction for trying several. A true period P
+    also makes P/2, P/3 … look periodic, so the strongest one is only a starting
+    point: _resolve_harmonics climbs from it to the period the job really has.
+    """
+    secs = sorted({int(x) for x in seconds})
+    bursts = loss_bursts(secs)
+    info = {"found": False, "bursts": len(bursts), "lost_seconds": len(secs), "tested": []}
+    span = (end or 0) - (start or 0)
+    tested = [p for p in periods if span >= 4 * p]
+    info["tested"] = tested
+    if len(bursts) < min_bursts or not tested:
+        return info
+    starts = [b[0] for b in bursts]
+    scores = {p: rayleigh(starts, p) for p in tested}
+    significant = [p for p in tested
+                   if scores[p][0] >= 0.5 and scores[p][1] * len(tested) < 1e-3]
+    if not significant:
+        return info
+    strongest = min(significant, key=lambda q: (scores[q][1], -q))
+    base = _resolve_harmonics(starts, strongest, tested)
+    r0, p0 = scores[base]
+    p0 = min(p0, scores[strongest][1])      # the evidence that there is a rhythm at all
+
+    # A clock-driven job keeps its phase; a timer that re-arms after each run
+    # drifts by the same amount every cycle. Fit phase against time: only a
+    # clear trend (|t| >= 4) that moved the slice visibly counts as drift, so a
+    # job that merely jitters by ten seconds stays "locked to the clock".
+    ang = [2 * math.pi * (t % base) / base for t in starts]
+    centre = math.atan2(sum(map(math.sin, ang)), sum(map(math.cos, ang))) / (2 * math.pi) * base
+    pts = []
+    for t in starts:
+        d = ((t % base) - centre + base / 2) % base - base / 2
+        if abs(d) < base / 4:
+            pts.append((t, d))
+    drift = 0.0
+    if len(pts) >= RHYTHM_MIN_BURSTS:
+        n = len(pts)
+        mt = sum(x for x, _ in pts) / n
+        md = sum(y for _, y in pts) / n
+        sxx = sum((x - mt) ** 2 for x, _ in pts)
+        if sxx > 0:
+            slope = sum((x - mt) * (y - md) for x, y in pts) / sxx
+            resid = sum((y - md - slope * (x - mt)) ** 2 for x, y in pts)
+            se = math.sqrt(resid / max(1, n - 2) / sxx)
+            if (se == 0 or abs(slope) / se >= 4) and abs(slope) * span >= 10.0:
+                drift = slope * base
+    locked = drift == 0.0
+    period = float(base) + drift
+
+    phases = [t % period for t in starts]
+    arc_start, width = _densest_arc(phases, period)
+    width = max(width, 1.0)
+    inside = [b for b in bursts if _in_arc(b[0] % period, arc_start, width, period)]
+    cycle_of = {int(b[0] // period) for b in inside}
+    first_cycle = int(math.ceil((start - arc_start) / period))
+    last_cycle = int(math.floor((end - arc_start - width) / period))
+    watched = list(range(first_cycle, last_cycle + 1))
+    hours = {}
+    for c in watched:
+        h = datetime.fromtimestamp(c * period + arc_start).hour
+        rec = hours.setdefault(h, [0, 0])
+        rec[1] += 1
+        if c in cycle_of:
+            rec[0] += 1
+    lost_inside = sum(b[2] for b in inside)
+    info.update({
+        "found": True, "period_s": period, "locked": locked,
+        "window_start": arc_start, "window_width": width,
+        "in_window": len(inside), "share": len(inside) / len(bursts),
+        "expected_share": min(1.0, (width + 4.0) / period),
+        "lost_in_window": lost_inside, "r": scores[base][0], "p": p0,
+        "p_adjusted": min(1.0, p0 * len(tested)),
+        "cycles": len(watched), "affected": len([c for c in watched if c in cycle_of]),
+        "hours": hours, "inside": inside, "all_starts": starts,
+        "longest_burst_s": max((b[1] - b[0] + 1 for b in inside), default=0),
+        "drift_s_per_cycle": 0.0 if locked else period - base,
+    })
+    return info
+
+
+def period_words(seconds):
+    """600 -> '10 min', 3600 -> '1 h', 603.4 -> '10 min 3 s'."""
+    s = int(round(seconds))
+    if s % 3600 == 0:
+        return f"{s // 3600} h"
+    if s % 60 == 0:
+        return f"{s // 60} min"
+    return f"{s // 60} min {s % 60} s" if s >= 60 else f"{s} s"
+
+
+def cycle_mmss(seconds):
+    s = int(seconds)
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def cycle_clock(R):
+    """Where the slice sits, in words a person can match against a router log."""
+    period, a = R["period_s"], R["window_start"]
+    b = (a + R["window_width"]) % period
+    span = f"{cycle_mmss(a)}–{cycle_mmss(b)}"
+    if not R["locked"]:
+        return f"{span} into each cycle, which drifts against the clock"
+    p = int(round(period))
+    if 3600 % p == 0 and p >= 60:
+        if p == 3600:
+            return f"at hh:{int(a) // 60:02d}:{int(a) % 60:02d} every hour"
+        step = p // 60
+        return f"{span} after hh:00, hh:{step:02d}, hh:{2 * step:02d} …"
+    if 86400 % p == 0:
+        marks = ", ".join(f"{k * p // 3600:02d}:{k * p % 3600 // 60:02d}" for k in range(3))
+        return f"{span} into cycles that start at {marks} …"
+    return f"{span} into each cycle"
+
+
 def analyze(db_path, run_id=None):
     """Read a capture back out of SQLite and turn it into a full picture."""
     conn = sqlite3.connect(db_path)
@@ -3205,6 +3436,8 @@ def analyze(db_path, run_id=None):
 
     slots = {}            # int(ts) -> [anchor_n, anchor_ok, gateway_n, gateway_ok]
     minutes = {}          # (target, minute) -> [n, ok, sum, max, list-ish]
+    lost_at = {}          # target -> timestamps of every lost probe (for the rhythm check)
+    anchor_rtt = {}       # int(ts) -> [sum, n] of anchor round trips that second
     prev_rtt = {}
     interval = float(A["config"].get("ping_interval") or 1.0)
     cur = conn.execute("SELECT ts, target, ok, rtt_ms, ttl FROM ping_samples"
@@ -3250,7 +3483,15 @@ def analyze(db_path, run_id=None):
                 t["episodes"] += 1
             t["streak"] += 1
             t["max_streak"] = max(t["max_streak"], t["streak"])
+            lost_at.setdefault(target, []).append(ts)
         role = role_of(target)
+        if okv and role in ("anchor", "custom"):
+            ar = anchor_rtt.get(int(ts))
+            if ar is None:
+                anchor_rtt[int(ts)] = [rtt, 1]
+            else:
+                ar[0] += rtt
+                ar[1] += 1
         if role in ("gateway", "anchor", "custom"):
             sl = slots.get(int(ts))
             if sl is None:
@@ -3403,14 +3644,6 @@ def analyze(db_path, run_id=None):
     A["hours"] = {h: {"loss": (r[1] / r[0]) if r[0] else None,
                       "rtt": (r[3] / r[2]) if r[2] else None,
                       "minutes": r[0]} for h, r in sorted(hours.items())}
-
-    # ---- outage periodicity ------------------------------------------------ #
-    A["periodic"] = None
-    if len(outages) >= 3:
-        gaps = [outages[i + 1]["start"] - outages[i]["start"] for i in range(len(outages) - 1)]
-        gm, gs = mean(gaps), stdev(gaps)
-        if gm and gs is not None and gm > 20 and gs / gm < 0.25:
-            A["periodic"] = {"period_s": gm, "cv": gs / gm, "count": len(outages)}
 
     # ---- WAN / failover ----------------------------------------------------- #
     A.update(_analyze_wan(conn, run_id, A, targets, interval))
@@ -3591,11 +3824,76 @@ def analyze(db_path, run_id=None):
         got = _q(conn, f"SELECT COUNT(*) AS c FROM {table} WHERE run_id=?", (run_id,))
         A["rows"][table] = got[0]["c"] if got else 0
 
+    A["rhythm"] = _rhythm(conn, run_id, A, lost_at, anchor_rtt, inet_names)
+
     A["score"], A["score_parts"] = _score(A)
     A["grade"] = grade_for(A["score"])
     A["findings"] = _findings(A, cfg)
     conn.close()
     return A
+
+
+def _rhythm(conn, run_id, A, lost_at, anchor_rtt, inet_names):
+    """Run find_rhythm on the anchors' loss and add what explains it."""
+    # Loss during netwatch's own speed tests is self-inflicted and scheduled by
+    # netwatch itself — leave it out, or it would "discover" its own timer.
+    busy = [(a - 2, b + 5) for a, b, kind in A["phases"] if kind.startswith("speed")]
+    seconds = {int(ts) for name in inet_names for ts in lost_at.get(name, [])
+               if not any(a <= ts <= b for a, b in busy)}
+    R = find_rhythm(seconds, A["started"], A["ended"])
+    if not R["found"]:
+        return R
+    period, w0, width = R["period_s"], R["window_start"], R["window_width"]
+    inside = R["inside"]
+
+    def during(ts, pad=2):
+        return any(b0 - pad <= ts <= b1 + pad for b0, b1, _n in inside)
+
+    # an independent probe: did the public-IP lookups fail in the same slice?
+    wan = [r["ts"] for r in _q(conn, "SELECT ts FROM wan_samples WHERE run_id=? AND ok=0",
+                               (run_id,))]
+    R["wan_fail_total"] = len(wan)
+    R["wan_fail_inside"] = sum(1 for ts in wan if _in_arc(ts % period, w0, width, period))
+
+    # where it happens: did the hops before the internet drop anything meanwhile?
+    R["hops"] = {}
+    for role, names in (("gateway", ("gateway",)), ("lan", ("lan-hop",)),
+                        ("isp", ("isp-edge", "isp-hop"))):
+        name = next((n for n in names if n in A["targets"]), None)
+        if name:
+            R["hops"][role] = {"name": name, "lost": sum(1 for ts in lost_at.get(name, [])
+                                                         if during(ts))}
+    # queueing (the line is full) or dropping (something discards packets)?
+    starts = [b0 for b0, _b1, _n in inside]
+    lead_in = {sec for b0 in starts for sec in range(b0 - 20, b0 - 1)}
+    before, overall = [], []
+    for sec, (total, n) in anchor_rtt.items():
+        overall.append(total / n)
+        if sec in lead_in:
+            before.append(total / n)
+    R["rtt_before"] = percentile(sorted(before), 50) if before else None
+    R["rtt_overall"] = percentile(sorted(overall), 50) if overall else None
+    R["outages_inside"] = sum(1 for o in A["outages"] if during(o["start"]))
+
+    # is it netwatch itself? compare with its own scheduled jobs
+    jobs = {
+        "speed test": [a for a, _b, kind in A["phases"] if kind.startswith("speed")],
+        "traceroute": [r["ts"] for r in _q(conn, "SELECT DISTINCT ts FROM trace_hops"
+                                                 " WHERE run_id=?", (run_id,))],
+        "NTP check": [r["ts"] for r in _q(conn, "SELECT ts FROM ntp_samples WHERE run_id=?",
+                                          (run_id,))],
+        "port check": [r["ts"] for r in _q(conn, "SELECT ts FROM port_checks WHERE run_id=?",
+                                           (run_id,))],
+    }
+    R["own_job"] = None
+    for job, times in jobs.items():
+        if not times:
+            continue
+        near = sum(1 for b0 in starts if any(b0 - 5 <= t <= b0 + 2 for t in times))
+        if near >= max(3, 0.5 * len(starts)):
+            R["own_job"] = job
+            break
+    return R
 
 
 def _bufferbloat(conn, run_id, phases, inet_names):
@@ -3849,6 +4147,13 @@ def _score(A):
     if bb.get("grade"):
         parts["bufferbloat"] = BLOAT_SCORE.get(bb["grade"], 50)
         weights["bufferbloat"] = 5
+    # A schedule that keeps knocking the line over barely moves the loss
+    # percentage, yet it is what breaks long-lived sessions — count it.
+    R = A.get("rhythm") or {}
+    if R.get("found") and not R.get("own_job") and R.get("cycles"):
+        hit = R["affected"] / R["cycles"]
+        parts["regularity"] = max(0.0, 100.0 * (1.0 - min(1.0, 1.5 * hit)))
+        weights["regularity"] = 10
     if not weights:
         return 0.0, {}
     total_w = sum(weights.values())
@@ -4207,15 +4512,9 @@ def _findings(A, cfg):
                       "or leave it as is if you are on a metered connection."))
 
     # -- patterns -------------------------------------------------------------- #
-    if A.get("periodic"):
-        p = A["periodic"]
-        out.append(_f("critical", f"Outages repeat about every {fmt_dur(p['period_s'])}",
-                      f"{p['count']} interruptions spaced almost evenly (variation "
-                      f"{p['cv'] * 100:.0f}%). Regular timing points at something scheduled: a "
-                      "DHCP lease renewal, a PPPoE re-dial, a scheduled router reboot or a "
-                      "watchdog.",
-                      "Check the router's DHCP lease time and any scheduled reboot; compare the "
-                      "outage timestamps below with the router log."))
+    R = A.get("rhythm") or {}
+    if R.get("found"):
+        out.append(_rhythm_finding(R))
     if A.get("hours") and A["duration"] > 4 * 3600:
         hs = {h: v for h, v in A["hours"].items() if v["loss"] is not None and v["minutes"] >= 5}
         if len(hs) >= 4:
@@ -4235,6 +4534,101 @@ def _findings(A, cfg):
     order = {"critical": 0, "warning": 1, "info": 2, "ok": 3}
     out.sort(key=lambda x: order.get(x["severity"], 9))
     return out
+
+
+def _rhythm_hours(R):
+    """'none at 01:00–03:00' style summary of the hours the rhythm skipped."""
+    # hours come in capture order, so a quiet night across midnight stays one run
+    quiet = [h for h, (hit, total) in R["hours"].items() if not hit and total >= 3]
+    runs, cur = [], []
+    for h in quiet:
+        if cur and h == (cur[-1] + 1) % 24:
+            cur.append(h)
+        else:
+            if cur:
+                runs.append(cur)
+            cur = [h]
+    if cur:
+        runs.append(cur)
+    runs = [r for r in runs if len(r) >= 2]
+    if not runs:
+        return ""
+    return "; none at " + ", ".join(f"{r[0]:02d}:00–{r[-1]:02d}:59" for r in runs)
+
+
+def _rhythm_finding(R):
+    per = period_words(R["period_s"])
+    clock = cycle_clock(R)
+    n, k = R["bursts"], R["in_window"]
+    expected = R["expected_share"] * n
+    lines = [
+        f"{k} of {n} loss bursts ({R['lost_in_window']} of {R['lost_seconds']} lost seconds) "
+        f"fell in one {R['window_width']:.0f}-second slice of the {per} cycle — "
+        f"{100 * R['expected_share']:.0f}% of the time, where chance would put about "
+        f"{expected:.1f} of them (Rayleigh test, p ≈ {max(R['p_adjusted'], 1e-99):.0e})."]
+    if R["locked"]:
+        lines.append("The slice stayed put for the whole capture, so this follows a clock — "
+                     "something scheduled, not random degradation.")
+    else:
+        lines.append(f"The period is {R['period_s']:.1f} s rather than a round number, so it "
+                     f"drifts against the clock by {R['drift_s_per_cycle']:+.1f} s a cycle — "
+                     "a timer that re-arms after each run (a lease, a keep-alive, a watchdog) "
+                     "rather than a clock-driven job.")
+    lines.append(f"It showed up in {R['affected']} of {R['cycles']} cycles{_rhythm_hours(R)}; "
+                 f"the longest burst lasted {R['longest_burst_s']} s.")
+    if R.get("wan_fail_inside", 0) >= 2:
+        lines.append(f"The public-IP lookups — an independent probe — failed in the same slice "
+                     f"{R['wan_fail_inside']} of {R['wan_fail_total']} times.")
+    hops = R.get("hops") or {}
+    local = [h for h in ("gateway", "lan") if h in hops and hops[h]["lost"]]
+    isp = hops.get("isp")
+    if local:
+        lines.append(f"{hops[local[0]]['name']} stopped answering during these bursts too, so "
+                     "the cause is inside your network: the router, a switch or a cable.")
+    elif isp and isp["lost"]:
+        lines.append(f"Your network answered throughout, but {isp['name']} dropped probes too — "
+                     "the access line or the provider's first router.")
+    elif hops:
+        names = ", ".join(v["name"] for v in hops.values())
+        lines.append(f"Meanwhile {names} kept answering: the LAN and the provider's first router "
+                     "were fine, so the break is where traffic leaves your edge router "
+                     "(routing, NAT, failover) or just beyond it.")
+    before, overall = R.get("rtt_before"), R.get("rtt_overall")
+    if before and overall:
+        if before > overall * 1.5:
+            lines.append(f"Latency climbed to {before:.0f} ms (normally {overall:.0f} ms) in the "
+                         "20 s before each burst — the line fills up first, which points at a "
+                         "scheduled transfer such as a backup, a sync or an update.")
+        else:
+            lines.append(f"Latency did not rise before the bursts ({before:.0f} ms against "
+                         f"{overall:.0f} ms normally): packets are dropped, not queued — a device "
+                         "discarding traffic (a route or NAT change, a failover check, a CPU "
+                         "spike), not a full line.")
+    if R.get("own_job"):
+        lines.append(f"The bursts line up with netwatch's own {R['own_job']}s, so the "
+                     "measurement itself is the likeliest cause.")
+        return _f("info", f"Loss repeats every {per} — in step with netwatch's own "
+                          f"{R['own_job']}", " ".join(lines),
+                  f"Re-run with the {R['own_job']} less often or switched off to confirm.",
+                  [_burst_line(b, R["period_s"]) for b in R["inside"][:8]])
+    lines.append("Short bursts barely move the loss figures, but anything that changes routes "
+                 "or NAT state while it runs resets long-lived connections — trading "
+                 "platforms, calls, game sessions, SSH and VPN tunnels.")
+    severe = R.get("outages_inside") or R["longest_burst_s"] >= 30
+    return _f("critical" if severe else "warning",
+              f"Packet loss comes back every {per} — {clock}",
+              " ".join(lines),
+              f"Look for something that runs every {per}: a scheduled script or a health "
+              "check on the router or load balancer, a DHCP or PPPoE renewal, a cron job on a "
+              "machine in the network. Compare the router's log with the burst times listed "
+              "here; switching the suspect off for an hour and re-running netwatch confirms it.",
+              [_burst_line(b, R["period_s"]) for b in R["inside"][:8]])
+
+
+def _burst_line(burst, period):
+    b0, b1, lost = burst
+    return (f"{ts_str(b0)} · {b1 - b0 + 1} s long · {lost} lost second(s) · "
+            f"{cycle_mmss(b0 % period)} into the cycle")
 
 
 def _wan_findings(A):
@@ -4835,6 +5229,46 @@ def chart_hist(path, values, title, subtitle="", width=1000, height=300, unit="m
     return svg.save(path, title)
 
 
+def chart_cycle(path, R, title, subtitle="", width=1000, height=280):
+    """Where in each cycle the loss bursts start: one bar per 1/60 of the period,
+    the slice the rhythm lives in shaded."""
+    svg = Svg(width, height)
+    svg.text(14, 22, title, cls="title ink")
+    if subtitle:
+        svg.text(14, 38, subtitle, cls="sub muted")
+    period, a, w = R["period_s"], R["window_start"], R["window_width"]
+    bins = 60
+    counts = [0] * bins
+    everything = R.get("all_starts") or [b[0] for b in R["inside"]]
+    for t in everything:
+        counts[min(bins - 1, int((t % period) / period * bins))] += 1
+    ml, mr, mt, mb = 56, 24, 52, 40
+    pw, ph = width - ml - mr, height - mt - mb
+    top = max(counts) or 1
+    svg.rect(ml, mt, pw, ph, "none", ' class="plot"')
+    for lo, span in ((a, min(w, period - a)), (0.0, max(0.0, a + w - period))):
+        if span > 0:
+            svg.rect(ml + pw * lo / period, mt, max(2.0, pw * span / period), ph,
+                     C_BAD, ' opacity="0.22"')
+    bw = pw / bins
+    for i, c in enumerate(counts):
+        if not c:
+            continue
+        mid = (i + 0.5) * period / bins
+        hot = _in_arc(mid, a, w, period, margin=period / bins)
+        h = ph * c / top
+        svg.rect(ml + i * bw, mt + ph - h, max(1.0, bw - 1), h,
+                 C_BAD if hot else PALETTE[0], ' rx="1"')
+    for i in range(7):
+        x = ml + pw * i / 6
+        svg.text(x, mt + ph + 16, cycle_mmss(period * i / 6), cls="lbl muted", anchor="middle")
+    svg.text(ml, mt + ph + 32, f"position inside each {period_words(period)} cycle (m:ss)",
+             cls="lbl muted")
+    svg.text(ml + pw, mt + ph + 32, "bar height = loss bursts starting there",
+             cls="lbl muted", anchor="end")
+    return svg.save(path, title)
+
+
 def chart_stacked(path, categories, layers, title, subtitle="", width=1000, unit="ms"):
     """layers: [(name, color, [values per category])] drawn as stacked h-bars."""
     height = 66 + len(categories) * 30 + 26
@@ -5020,6 +5454,50 @@ def build_report(A, out_dir, chart_dir="charts"):
         W(md_table(["Started", "Ended", "Duration", "Gateway", "Most likely scope"], rows))
         if len(A["outages"]) > 200:
             W(f"\n_…and {len(A['outages']) - 200} more — query the database for the full list._\n")
+
+    # ------------------------------------------------------------------- rhythm
+    R = A.get("rhythm") or {}
+    if R.get("found"):
+        per = period_words(R["period_s"])
+        W("\n---\n\n## 🔁 Loss that comes back on a schedule\n")
+        W("\nEvery burst of lost probes to the public anchors was placed on a clock face that "
+          "turns once per candidate period (1 min … 2 h). Random trouble spreads around the "
+          "face; a scheduled job keeps landing on the same spot. netwatch's own speed tests "
+          "are left out so it cannot discover its own timer.\n")
+        chart_cycle(cpath("rhythm.svg"), R,
+                    f"Where in each {per} cycle the loss bursts start",
+                    f"shaded: the slice {cycle_clock(R)} — "
+                    f"{R['in_window']} of {R['bursts']} bursts")
+        charts.append(cref("rhythm.svg"))
+        W(f"\n![rhythm]({cref('rhythm.svg')})\n")
+        wan_row = (f"{R['wan_fail_inside']} of {R['wan_fail_total']}"
+                   if R.get("wan_fail_total") else "—")
+        W(md_table(
+            ["", ""],
+            [("Period", per + (" — locked to the clock" if R["locked"] else
+                               f" — drifts {R['drift_s_per_cycle']:+.1f} s per cycle")),
+             ("Slice of the cycle", cycle_clock(R)),
+             ("Bursts in the slice", f"{R['in_window']} of {R['bursts']} "
+                                     f"({100 * R['share']:.0f}%, chance alone: "
+                                     f"{100 * R['expected_share']:.0f}%)"),
+             ("Lost seconds in the slice", f"{R['lost_in_window']} of {R['lost_seconds']}"),
+             ("Cycles with a burst", f"{R['affected']} of {R['cycles']}"),
+             ("Longest burst", f"{R['longest_burst_s']} s"),
+             ("Public-IP lookups failing in the slice", wan_row),
+             ("Hops meanwhile", " · ".join(f"{v['name']} {v['lost']} lost"
+                                           for v in (R.get("hops") or {}).values()) or "—"),
+             ("Latency before a burst", f"{fmt_ms(R.get('rtt_before'))} ms "
+                                        f"(normally {fmt_ms(R.get('rtt_overall'))} ms)"),
+             ("Test", f"Rayleigh R = {R['r']:.2f}, p ≈ {max(R['p_adjusted'], 1e-99):.0e} "
+                      f"after trying {len(R['tested'])} periods")]))
+        W("\n**By hour** (cycles with a burst / cycles watched, in capture order): " + " · ".join(
+            f"{h:02d}:00 {hit}/{total}" for h, (hit, total) in R["hours"].items()) + "\n")
+        W("\n**The bursts in the slice** — compare these with the router's log:\n\n")
+        W(md_table(["Started", "Length", "Lost seconds", "Into the cycle"],
+                   [(ts_str(b0), f"{b1 - b0 + 1} s", str(lost), cycle_mmss(b0 % R["period_s"]))
+                    for b0, b1, lost in R["inside"][:60]]))
+        if len(R["inside"]) > 60:
+            W(f"\n_…and {len(R['inside']) - 60} more._\n")
 
     # ------------------------------------------------------------------ latency
     W("\n---\n\n## ⏱ Latency, jitter and loss per target\n")
@@ -5347,11 +5825,17 @@ def build_report(A, out_dir, chart_dir="charts"):
         W(md_table(["Hour", "Minutes sampled", "Average loss", "Average RTT"],
                    [(f"{h:02d}:00", v["minutes"], fmt_pct(v["loss"]), fmt_ms(v["rtt"]))
                     for h, v in sorted(hours.items())]))
-    if A.get("periodic"):
-        p = A["periodic"]
-        W(f"\n⚠️ **The outages repeat on a schedule** — roughly every "
-          f"{fmt_dur(p['period_s'])} (variation {p['cv'] * 100:.0f}% across {p['count']} "
-          f"events). Something timed is behind them.\n")
+    R = A.get("rhythm") or {}
+    if R.get("found"):
+        W(f"\n🔁 **The loss follows a {period_words(R['period_s'])} rhythm** — see *Loss that "
+          f"comes back on a schedule* above.\n")
+    elif R.get("tested") and R.get("bursts", 0) >= RHYTHM_MIN_BURSTS:
+        W(f"\nNo schedule in the loss: {R['bursts']} bursts were tried against periods from "
+          f"{period_words(min(R['tested']))} to {period_words(max(R['tested']))} and none "
+          f"fits.\n")
+    elif R.get("bursts"):
+        W(f"\nToo few loss bursts ({R['bursts']}) to look for a schedule — at least "
+          f"{RHYTHM_MIN_BURSTS} are needed.\n")
     if A.get("brownouts"):
         W(f"\n**{len(A['brownouts'])} degraded minute(s)** (loss ≥ 2% or latency more than "
           f"three times the {fmt_ms(A['baseline_rtt'])} ms baseline):\n\n")
@@ -5447,6 +5931,8 @@ def build_report(A, out_dir, chart_dir="charts"):
                     for ip, q in (A.get("wan_quality") or {}).items()},
         "findings": [{k: f[k] for k in ("severity", "title", "fix")} for f in A["findings"]],
         "speed": A.get("speed_stats"), "bufferbloat": A.get("bufferbloat"),
+        "rhythm": {k: v for k, v in (A.get("rhythm") or {}).items()
+                   if k not in ("inside", "all_starts")} or None,
         "db": A["db"],
     }
     with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8") as fh:
